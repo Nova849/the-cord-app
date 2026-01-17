@@ -1,0 +1,6 @@
+{
+  "apiKey": "your_key_here",
+  "apiSecret": "your_secret_here",
+  "host": "http://127.0.0.1:7880",
+  "port": 7882
+}

@@ -1,0 +1,29 @@
+--Angelo Test-- 
+
+
+
+
+40000-49000 ports for Jolie
+
+____________________________________
+
+Go to http://192.168.1.254 → log in.
+Firewall → NAT/Gaming.
+Create a new service (custom):
+Service name: livekit-7880
+Protocol: TCP
+Port range: 7880 to 7880
+Save.
+Create another service:
+Service name: livekit-7881
+Protocol: TCP
+Port range: 7881 to 7881
+Create a third service for media:
+Service name: livekit-udp
+Protocol: UDP
+Port range: 50000 to 60000
+Back in NAT/Gaming, select the LiveKit server device from the list (its LAN IP).
+Add the three services to that device and save.
+
+______________________________________
+

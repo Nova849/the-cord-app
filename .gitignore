@@ -134,3 +134,13 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+node_modules/
+livekit-desktop/node_modules/
+livekit-desktop/dist/
+dist/
+*.log
+log swap.txt
+User Keys.txt
+presence.config.json
+update.config.json
