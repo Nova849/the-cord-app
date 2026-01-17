@@ -37,23 +37,29 @@ function loadUpdateFeedUrl() {
   }
 }
 
+function normalizeUpdateUrl(url) {
+  const trimmed = String(url || '').trim();
+  if (!trimmed) return '';
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+}
+
 function persistUpdateFeedUrl(url) {
   if (!app?.getPath) return '';
   const configPath = path.join(app.getPath('userData'), 'update.config.json');
-  const payload = { updateUrl: url };
+  const payload = { updateUrl: normalizeUpdateUrl(url) };
   fs.writeFileSync(configPath, JSON.stringify(payload, null, 2));
   return configPath;
 }
 
 function setupAutoUpdater() {
   if (!app.isPackaged) return;
-  const feedUrl = loadUpdateFeedUrl();
+  const feedUrl = normalizeUpdateUrl(loadUpdateFeedUrl());
   if (!feedUrl) {
     console.log('Auto-update disabled (no update URL configured).');
     return;
   }
   try {
-    autoUpdater.setFeedURL({ url: feedUrl });
+    autoUpdater.setFeedURL({ provider: 'generic', url: feedUrl });
   } catch (e) {
     console.warn('Failed to set update feed URL', e);
     return;
@@ -64,7 +70,15 @@ function setupAutoUpdater() {
       mainWindow.webContents.send('update-status', 'Update available. Downloading...');
     }
   });
+  autoUpdater.on('update-not-available', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update-status', 'No updates available.');
+    }
+  });
   autoUpdater.on('update-downloaded', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update-status', 'Update ready to install.');
+    }
     if (updatePromptOpen) return;
     updatePromptOpen = true;
     dialog.showMessageBox({
@@ -85,6 +99,9 @@ function setupAutoUpdater() {
   });
   autoUpdater.on('error', (err) => {
     console.warn('Auto-update error', err);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update-status', 'Update error. Check the update URL.');
+    }
   });
   autoUpdater.checkForUpdates();
   setInterval(() => {
@@ -149,11 +166,11 @@ ipcMain.handle('set-mute-hotkey', async (event, accelerator) => {
 
 ipcMain.handle('set-update-feed-url', async (event, url) => {
   try {
-    const next = String(url || '').trim();
+    const next = normalizeUpdateUrl(url);
     persistUpdateFeedUrl(next);
     if (app.isPackaged && next) {
       try {
-        autoUpdater.setFeedURL({ url: next });
+        autoUpdater.setFeedURL({ provider: 'generic', url: next });
         autoUpdater.checkForUpdates();
       } catch (e) {
         return { ok: false, error: e?.message || 'Failed to set feed URL' };
@@ -169,12 +186,12 @@ ipcMain.handle('check-for-updates', async () => {
   if (!app.isPackaged) {
     return { ok: false, message: 'Updates require a packaged build.' };
   }
-  const feedUrl = loadUpdateFeedUrl();
+  const feedUrl = normalizeUpdateUrl(loadUpdateFeedUrl());
   if (!feedUrl) {
     return { ok: false, message: 'Update feed URL not set.' };
   }
   try {
-    autoUpdater.setFeedURL({ url: feedUrl });
+    autoUpdater.setFeedURL({ provider: 'generic', url: feedUrl });
   } catch (e) {
     return { ok: false, message: 'Failed to set update URL.' };
   }

@@ -6,6 +6,7 @@ if (!localStorage.getItem(settingsKey)) {
   applyTheme(prefersDark ? 'dark' : 'light');
 }
   loadSettings();
+  applyServicesCollapsed(areServiceFieldsFilled());
   applyUpdateFeedUrl();
   updateHotkeyDisplay();
   applyGlobalMuteHotkey();
@@ -157,6 +158,11 @@ chatCollapseBtn?.addEventListener("click", () => {
   }
   saveSettings();
 });
+servicesToggle?.addEventListener("click", () => {
+  if (!servicesSection) return;
+  const collapsed = servicesSection.classList.toggle('collapsed');
+  servicesSection.setAttribute('data-collapsed', collapsed ? 'true' : 'false');
+});
 forceUpdateBtn?.addEventListener("click", async () => {
   setUpdateStatus('Checking for updates...');
   try {
@@ -210,6 +216,9 @@ window.electronAPI?.onGlobalMuteToggle?.(() => {
   if (!muteHotkey) return;
   setMicMuteState(!micMuted);
   saveSettings();
+});
+window.electronAPI?.onUpdateStatus?.((message) => {
+  setUpdateStatus(message || '');
 });
 leaveBtnIcon?.addEventListener("click", () => {
   if (joinBtn) joinBtn.click();

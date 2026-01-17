@@ -50,25 +50,32 @@
               <input id="serverUrlInput" placeholder="ws://your-livekit-server:7880">
             </div>
           </div>
-          <div class="service-settings">
-            <div class="panel-title small">Services</div>
-            <div class="field">
-              <label for="chatServerInput">Chat server URL</label>
-              <input id="chatServerInput" placeholder="wss://chat.example.com:7883">
+          <div id="servicesSection" class="service-settings collapsible" data-collapsed="false">
+            <div class="section-header">
+              <div class="panel-title small">Services</div>
+              <button id="servicesToggle" class="btn ghost small collapse-toggle" type="button" aria-label="Toggle Services">
+                <span class="chevron" aria-hidden="true"></span>
+              </button>
             </div>
-            <div class="field">
-              <label for="presenceServerInput">Presence server URL</label>
-              <input id="presenceServerInput" placeholder="https://presence.example.com:7882">
+            <div class="service-settings-body">
+              <div class="field">
+                <label for="chatServerInput">Chat server URL</label>
+                <input id="chatServerInput" placeholder="wss://chat.example.com:7883">
+              </div>
+              <div class="field">
+                <label for="presenceServerInput">Presence server URL</label>
+                <input id="presenceServerInput" placeholder="https://presence.example.com:7882">
+              </div>
+              <div class="field">
+                <label for="updateServerInput">Update feed URL</label>
+                <input id="updateServerInput" placeholder="https://updates.example.com">
+              </div>
+              <div class="settings-hint">Leave blank to use the LiveKit host for chat/presence.</div>
+              <div class="button-row compact">
+                <button id="forceUpdateBtn" class="btn ghost small" type="button">Check updates</button>
+              </div>
+              <div id="updateStatusText" class="settings-hint"></div>
             </div>
-            <div class="field">
-              <label for="updateServerInput">Update feed URL</label>
-              <input id="updateServerInput" placeholder="https://updates.example.com">
-            </div>
-            <div class="settings-hint">Leave blank to use the LiveKit host for chat/presence.</div>
-            <div class="button-row compact">
-              <button id="forceUpdateBtn" class="btn ghost small" type="button">Check updates</button>
-            </div>
-            <div id="updateStatusText" class="settings-hint"></div>
           </div>
           <div class="button-row">
             <button id="joinBtn" class="btn primary">Join</button>

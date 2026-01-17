@@ -135,6 +135,8 @@ const chatCollapseBtn = document.getElementById("chatCollapseBtn");
 const chatStatus = document.getElementById("chatStatus");
 const forceUpdateBtn = document.getElementById("forceUpdateBtn");
 const updateStatusText = document.getElementById("updateStatusText");
+const servicesSection = document.getElementById("servicesSection");
+const servicesToggle = document.getElementById("servicesToggle");
 const streamSetupSection = document.getElementById("streamSetupSection");
 const audioSettingsOverlay = document.getElementById("audioSettingsOverlay");
 const audioSettingsClose = document.getElementById("audioSettingsClose");
@@ -360,6 +362,19 @@ async function applyUpdateFeedUrl() {
     const raw = updateServerInput?.value?.trim() || '';
     await window.electronAPI.setUpdateFeedUrl(raw);
   } catch (e) {}
+}
+
+function areServiceFieldsFilled() {
+  const chat = chatServerInput?.value?.trim();
+  const presence = presenceServerInput?.value?.trim();
+  const update = updateServerInput?.value?.trim();
+  return !!(chat && presence && update);
+}
+
+function applyServicesCollapsed(collapsed) {
+  if (!servicesSection) return;
+  servicesSection.classList.toggle('collapsed', collapsed);
+  servicesSection.setAttribute('data-collapsed', collapsed ? 'true' : 'false');
 }
 
 function getChatIdentity() {
@@ -3009,7 +3024,8 @@ function setStreamButtonState(active) {
 
 function setJoinButtonState(connected) {
   if (!joinBtn) return;
-  joinBtn.textContent = connected ? "Leave" : "Join";
+  joinBtn.textContent = "Join";
+  joinBtn.style.display = connected ? "none" : "";
   const connectionTitle = document.getElementById("connectionTitle");
   if (connectionTitle) connectionTitle.textContent = connected ? "" : "Connection";
   if (roomAccessSection) roomAccessSection.classList.toggle('connected', connected);

@@ -313,6 +313,20 @@ body.narrow .chat-panel.collapsed {
   gap: 10px;
 }
 
+.service-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.service-settings.collapsed .service-settings-body {
+  display: none;
+}
+
+.service-settings.collapsed .chevron {
+  transform: rotate(-90deg);
+}
+
 .service-settings .field {
   margin-bottom: 0;
 }
@@ -354,7 +368,8 @@ body.narrow .chat-panel.collapsed {
 .controls {
   position: relative;
   z-index: 3;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .stage {

@@ -9,17 +9,6 @@ Prereqs
 - Node.js 18+ installed
 - A running LiveKit server reachable from this machine
 
-Quick start
------------
-1) Open a cmd terminal in this repo root.
-2) Install Node js  
-    https://nodejs.org/dist/v24.13.0/node-v24.13.0-x64.msi
-2) Install deps:
-   cd livekit-desktop
-   npm install
-3) Start the app:
-   npx electron .
-
 
 Generating a test token
 -----------------------
@@ -52,3 +41,10 @@ Notes
 - Screen share source can be selected from the Source dropdown.
 - Stream controls are in the left panel.
 - If you change tokens/permissions, re-generate the JWT.
+
+
+How to increase the build number
+---------------------------------
+cd C:\Users\cwill\Desktop\LiveKit\the-cord-app\LiveKit\livekit-desktop
+npm version 1.0.1 --no-git-tag-version
+npm run dist
