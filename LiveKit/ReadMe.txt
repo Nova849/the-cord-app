@@ -1,50 +1,74 @@
-LiveKit Desktop Test App
-========================
+The Cord (LiveKit Desktop)
+==========================
 
-This repo contains a simple Electron client for testing LiveKit desktop
-screen share + audio. Follow these steps to run it locally.
+Electron client for LiveKit screen share + voice + chat. Designed to connect
+to remote public services (LiveKit, chat server, presence server). The app
+does not run local servers.
 
-Prereqs
--------
-- Node.js 18+ installed
-- A running LiveKit server reachable from this machine
+Project layout
+--------------
+- LiveKit/livekit-desktop   Electron app (this is what you run/build)
+- LiveKit/generateToken.js  JWT helper (local dev/testing)
+- presenceServer/           Optional presence server (runs on your server)
+- chatServer/               Optional chat server (runs on your server)
 
+Requirements
+------------
+- Node.js 18+
+- A reachable LiveKit server
+- A JWT for the room (see below)
 
-Generating a test token
------------------------
+Run locally (dev)
+-----------------
 From the repo root:
-In admin Powershell
+  cd LiveKit/livekit-desktop
+  npm install
+  npx electron .
+
+Generate a test JWT
+-------------------
+From the repo root (Admin PowerShell):
   node generateToken.js
 
 Paste the JWT into the app and click Join.
 
+Connection + Services fields
+----------------------------
+In the app (Connection > Services):
+- Server URL: your LiveKit URL (ws:// or wss://)
+- JWT token: paste the token
+- Chat server URL: optional, remote service
+- Presence server URL: optional, remote service
+- Update feed URL: for auto updates
+
+If chat/presence fields are blank, the app derives them from the LiveKit host.
+
+Build a Windows installer
+-------------------------
+1) Bump version in LiveKit/livekit-desktop/package.json (e.g. 1.0.1)
+2) Build:
+   cd LiveKit/livekit-desktop
+   npm run dist
+
+Output files are in LiveKit/livekit-desktop/dist:
+- The.Cord.Setup.x.y.z.exe
+- The.Cord.Setup.x.y.z.exe.blockmap
+- latest.yml
+
 Auto updates (GitHub Releases)
 ------------------------------
-Auto updates only work in packaged builds (the installer), not when running
-`npx electron .`.
+Auto updates only work in packaged builds (the installer), not in dev.
 
-1) Bump the version in livekit-desktop/package.json (e.g. 1.0.1).
-2) Build the installer:
-   cd livekit-desktop
-   npm run dist
-3) Create a GitHub Release (tag like v1.0.1) and upload these files from
-   livekit-desktop/dist:
-   - The Cord Setup x.y.z.exe
+1) Create a GitHub Release (tag like v1.0.1).
+2) Upload these files from dist:
    - latest.yml
-   - The Cord Setup x.y.z.exe.blockmap
-4) In the app Connection > Services, set Update feed URL to:
+   - The.Cord.Setup.x.y.z.exe
+   - The.Cord.Setup.x.y.z.exe.blockmap
+3) In the app set Update feed URL to:
    https://github.com/OWNER/REPO/releases/latest/download/
-5) Reopen the app and click "Check updates".
+4) Restart the app and click "Check updates".
 
 Notes
 -----
-- Screen share source can be selected from the Source dropdown.
-- Stream controls are in the left panel.
-- If you change tokens/permissions, re-generate the JWT.
-
-
-How to increase the build number
----------------------------------
-cd C:\Users\cwill\Desktop\LiveKit\the-cord-app\LiveKit\livekit-desktop
-npm version 1.0.1 --no-git-tag-version
-npm run dist
+- If you see a 404 update error, the file names in latest.yml must match the
+  uploaded assets exactly.
