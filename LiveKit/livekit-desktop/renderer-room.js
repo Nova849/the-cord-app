@@ -191,7 +191,7 @@ joinBtn.onclick = async () => {
       updateParticipantWatchControls(id);
       const kind = publication?.kind || publication?.track?.kind;
       if (kind === 'audio') {
-        const isStreamAudio = isScreenShareAudioStrict(publication?.track || {}, publication?.source);
+        const isStreamAudio = isStreamAudioPublication(publication);
         if (typeof publication.setSubscribed === 'function') {
           publication.setSubscribed(isStreamAudio ? watchedVideoParticipants.has(id) : true);
         }
@@ -389,7 +389,7 @@ joinBtn.onclick = async () => {
                     cacheVideoPublication(pid, pub);
                   }
                   if (kind === 'audio') {
-                    const isStreamAudio = isScreenShareAudioStrict(pub?.track || {}, pub?.source);
+                    const isStreamAudio = isStreamAudioPublication(pub);
                     if (typeof pub.setSubscribed === 'function') {
                       try { pub.setSubscribed(isStreamAudio ? watchedVideoParticipants.has(p.identity || p.sid) : true); } catch (e) {}
                     }
@@ -410,7 +410,7 @@ joinBtn.onclick = async () => {
                   const sid = info.trackSid;
                   if (sid && processedTrackSids.has(sid)) { debug('  skipping already-processed trackSid', sid); return; }
                   if (kind === 'audio') {
-                    const isStreamAudio = isScreenShareAudioStrict(pub?.track || {}, pub?.source);
+                    const isStreamAudio = isStreamAudioPublication(pub);
                     if (isStreamAudio && !watchedVideoParticipants.has(p.identity || p.sid)) {
                       debug('  skipping stream audio publication (not watched)');
                       return;

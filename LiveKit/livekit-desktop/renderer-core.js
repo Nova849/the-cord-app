@@ -1279,11 +1279,7 @@ function getStreamAudioPublicationsForParticipant(p) {
     const filtered = pubs.filter(pub => {
       const kind = pub?.kind || pub?.track?.kind;
       if (kind !== 'audio') return false;
-      const isStream = isScreenShareAudioStrict(pub?.track || {}, pub?.source);
-      if (isStream) return true;
-      const name = (pub?.trackName || pub?.name || pub?.track?.name || '').toLowerCase();
-      if (name.includes('systemaudio')) return true;
-      return false;
+      return isStreamAudioPublication(pub);
     });
     return filtered;
   } catch (e) {}
@@ -1323,10 +1319,7 @@ function getMicAudioPublicationsForParticipant(p) {
     return pubs.filter(pub => {
       const kind = pub?.kind || pub?.track?.kind;
       if (kind !== 'audio') return false;
-      if (isScreenShareAudioStrict(pub?.track || {}, pub?.source)) return false;
-      const name = (pub?.trackName || pub?.name || pub?.track?.name || '').toLowerCase();
-      if (name.includes('systemaudio')) return false;
-      return true;
+      return !isStreamAudioPublication(pub);
     });
   } catch (e) {}
   return [];
@@ -1436,8 +1429,7 @@ function setParticipantStreamAudioSubscribed(participantId, subscribe) {
       hasTrack: !!pub?.track
     })) });
     pubs.forEach(pub => {
-      const isStream = isScreenShareAudioStrict(pub?.track || {}, pub?.source);
-      if (!isStream) return;
+      if (!isStreamAudioPublication(pub)) return;
       if (pub && typeof pub.setSubscribed === 'function') {
         pub.setSubscribed(subscribe);
       }
@@ -2139,6 +2131,19 @@ function isScreenShareAudioStrict(track, sourceOverride) {
   return false;
 }
 
+function isLikelyStreamAudioTrack(track, sourceOverride) {
+  if (isScreenShareAudioStrict(track, sourceOverride)) return true;
+  return isScreenShareAudio(track, sourceOverride);
+}
+
+function isStreamAudioPublication(pub) {
+  if (!pub) return false;
+  if (isScreenShareAudioStrict(pub?.track || {}, pub?.source)) return true;
+  const name = (pub?.trackName || pub?.name || pub?.track?.name || '').toLowerCase();
+  if (name.includes('systemaudio') || name.includes('screen_share_audio') || name.includes('screen')) return true;
+  return isScreenShareAudio(pub?.track || {}, pub?.source);
+}
+
 function isMicrophoneAudio(track, sourceOverride) {
   try {
     const rawSource = sourceOverride ?? track?.source;
@@ -2349,11 +2354,11 @@ function reconcileParticipantAudioAssignments(participantId) {
 
   if (tracks.length === 1) {
     const info = tracks[0];
-    const isScreenAudio = isScreenShareAudioStrict(info.track, info.source);
+    const isScreenAudio = isLikelyStreamAudioTrack(info.track, info.source);
     if (isScreenAudio) streamInfo = info;
     else micInfo = info;
   } else if (tracks.length >= 2) {
-    streamInfo = tracks.find(t => isScreenShareAudioStrict(t.track, t.source)) || null;
+    streamInfo = tracks.find(t => isLikelyStreamAudioTrack(t.track, t.source)) || null;
     if (streamInfo) {
       micInfo = tracks.find(t => isMicrophoneAudio(t.track, t.source)) || tracks.find(t => t !== streamInfo) || null;
     } else {
@@ -2371,7 +2376,7 @@ function reconcileParticipantAudioAssignments(participantId) {
     }
     if (isStreaming) {
       const explicitMic = tracks.find(t => isMicrophoneAudio(t.track, t.source)) || null;
-      const explicitStream = tracks.find(t => isScreenShareAudioStrict(t.track, t.source)) || null;
+      const explicitStream = tracks.find(t => isLikelyStreamAudioTrack(t.track, t.source)) || null;
       if (explicitMic) {
         micInfo = explicitMic;
         if (explicitStream) {
@@ -2384,6 +2389,23 @@ function reconcileParticipantAudioAssignments(participantId) {
         if (micInfo === streamInfo) {
           micInfo = tracks.find(t => t !== streamInfo) || null;
         }
+      }
+    }
+    if (isStreaming && micInfo && streamInfo && micInfo !== streamInfo) {
+      const micCh = micInfo.channelCount || 0;
+      const streamCh = streamInfo.channelCount || 0;
+      if (micCh && streamCh && micCh > streamCh) {
+        const swap = micInfo;
+        micInfo = streamInfo;
+        streamInfo = swap;
+      }
+    } else if (isStreaming && !streamInfo && tracks.length >= 2) {
+      const orderedByChannels = tracks.slice().sort((a, b) => (b.channelCount || 0) - (a.channelCount || 0));
+      const first = orderedByChannels[0];
+      const second = orderedByChannels[1];
+      if ((first?.channelCount || 0) > (second?.channelCount || 0)) {
+        streamInfo = first;
+        if (!micInfo || micInfo === streamInfo) micInfo = second || micInfo;
       }
     }
   }

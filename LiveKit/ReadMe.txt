@@ -28,6 +28,7 @@ From the repo root:
 Generate a test JWT
 -------------------
 From the repo root (Admin PowerShell):
+  cd LiveKit
   node generateToken.js
 
 Paste the JWT into the app and click Join.
@@ -42,6 +43,32 @@ In the app (Connection > Services):
 - Update feed URL: for auto updates
 
 If chat/presence fields are blank, the app derives them from the LiveKit host.
+
+Run presence + chat servers (optional, Docker)
+----------------------------------------------
+From the repo root, run these containers (PowerShell):
+
+Presence server:
+  docker run -d --name thecord-presence -p 7882:7882 `
+    -e LIVEKIT_API_KEY="YOUR_KEY" `
+    -e LIVEKIT_API_SECRET="YOUR_SECRET" `
+    -e LIVEKIT_HOST="http://YOUR_LIVEKIT_HOST:7880" `
+    -e PRESENCE_PORT=7882 `
+    -v ${PWD}:/repo -w /repo/LiveKit node:18-alpine `
+    sh -c "npm install --omit=dev && NODE_PATH=/repo/LiveKit/node_modules node /repo/presenceServer/presenceServer.js"
+
+Chat server:
+  docker run -d --name thecord-chat -p 7883:7883 `
+    -e CHAT_PORT=7883 `
+    -v ${PWD}:/repo -w /repo/LiveKit node:18-alpine `
+    sh -c "npm install --omit=dev && NODE_PATH=/repo/LiveKit/node_modules node /repo/chatServer/chatServer.js"
+
+Then set the Presence server URL and Chat server URL in the app to your public
+server address (with ports) and port-forward those ports as needed.
+
+Tip: to stop/remove containers:
+  docker stop thecord-presence thecord-chat
+  docker rm thecord-presence thecord-chat
 
 Build a Windows installer
 -------------------------
