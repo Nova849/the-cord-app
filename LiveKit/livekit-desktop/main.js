@@ -60,6 +60,7 @@ function setupAutoUpdater() {
   }
   try {
     autoUpdater.setFeedURL({ provider: 'generic', url: feedUrl });
+    console.log('[auto-update] feed URL', feedUrl);
   } catch (e) {
     console.warn('Failed to set update feed URL', e);
     return;
@@ -98,9 +99,11 @@ function setupAutoUpdater() {
     });
   });
   autoUpdater.on('error', (err) => {
-    console.warn('Auto-update error', err);
+    const details = err?.stack || err?.message || String(err);
+    console.error('Auto-update error', details);
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('update-status', 'Update error. Check the update URL.');
+      const message = err?.message ? `Update error: ${err.message}` : 'Update error. Check the update URL.';
+      mainWindow.webContents.send('update-status', message);
     }
   });
   autoUpdater.checkForUpdates();
@@ -193,12 +196,23 @@ ipcMain.handle('check-for-updates', async () => {
   try {
     autoUpdater.setFeedURL({ provider: 'generic', url: feedUrl });
   } catch (e) {
+    console.warn('Failed to set update URL', e);
     return { ok: false, message: 'Failed to set update URL.' };
   }
   try {
+    console.log('[auto-update] checkForUpdates', feedUrl);
     autoUpdater.checkForUpdates();
     return { ok: true, message: 'Checking for updates...' };
   } catch (e) {
+    console.warn('Update check failed', e);
     return { ok: false, message: 'Update check failed.' };
+  }
+});
+
+ipcMain.handle('get-app-version', async () => {
+  try {
+    return { ok: true, version: app.getVersion() };
+  } catch (e) {
+    return { ok: false, version: '' };
   }
 });

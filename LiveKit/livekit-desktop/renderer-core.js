@@ -135,6 +135,8 @@ const chatCollapseBtn = document.getElementById("chatCollapseBtn");
 const chatStatus = document.getElementById("chatStatus");
 const forceUpdateBtn = document.getElementById("forceUpdateBtn");
 const updateStatusText = document.getElementById("updateStatusText");
+const updateVersionText = document.getElementById("updateVersionText");
+const updateLastCheckedText = document.getElementById("updateLastCheckedText");
 const servicesSection = document.getElementById("servicesSection");
 const servicesToggle = document.getElementById("servicesToggle");
 const streamSetupSection = document.getElementById("streamSetupSection");
@@ -221,15 +223,33 @@ function setErrorBanner(message) {
 }
 
 let updateStatusTimer = null;
+let updateLastChecked = null;
 function setUpdateStatus(message) {
   if (!updateStatusText) return;
   updateStatusText.textContent = message || '';
   if (updateStatusTimer) clearTimeout(updateStatusTimer);
-  if (message) {
+  const shouldPersist = !!message && /no updates available|update ready to install|update error/i.test(message);
+  if (message && !shouldPersist) {
     updateStatusTimer = setTimeout(() => {
       if (updateStatusText) updateStatusText.textContent = '';
     }, 6000);
   }
+}
+
+function setUpdateVersion(version) {
+  if (!updateVersionText) return;
+  updateVersionText.textContent = `Version: ${version || '--'}`;
+}
+
+function formatUpdateTimestamp(date) {
+  if (!date) return '--';
+  return date.toLocaleString();
+}
+
+function setUpdateLastChecked(date) {
+  updateLastChecked = date || null;
+  if (!updateLastCheckedText) return;
+  updateLastCheckedText.textContent = `Last checked: ${formatUpdateTimestamp(updateLastChecked)}`;
 }
 
 function setPingDisplay(ms) {

@@ -19,6 +19,7 @@
   "build": {
     "appId": "com.thecord.app",
     "productName": "The Cord",
+    "artifactName": "The.Cord.Setup.${version}.${ext}",
     "directories": {
       "output": "dist"
     },

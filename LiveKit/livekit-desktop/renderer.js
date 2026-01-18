@@ -8,6 +8,9 @@ if (!localStorage.getItem(settingsKey)) {
   loadSettings();
   applyServicesCollapsed(areServiceFieldsFilled());
   applyUpdateFeedUrl();
+  window.electronAPI?.getAppVersion?.()
+    .then((res) => setUpdateVersion(res?.ok ? res.version : ''))
+    .catch(() => setUpdateVersion(''));
   updateHotkeyDisplay();
   applyGlobalMuteHotkey();
   loadParticipantAudioSettings();
@@ -165,6 +168,7 @@ servicesToggle?.addEventListener("click", () => {
 });
 forceUpdateBtn?.addEventListener("click", async () => {
   setUpdateStatus('Checking for updates...');
+  setUpdateLastChecked(new Date());
   try {
     const res = await window.electronAPI?.checkForUpdates?.();
     if (!res) {
@@ -219,6 +223,7 @@ window.electronAPI?.onGlobalMuteToggle?.(() => {
 });
 window.electronAPI?.onUpdateStatus?.((message) => {
   setUpdateStatus(message || '');
+  setUpdateLastChecked(new Date());
 });
 leaveBtnIcon?.addEventListener("click", () => {
   if (joinBtn) joinBtn.click();
