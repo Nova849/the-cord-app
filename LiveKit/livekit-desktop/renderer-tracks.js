@@ -23,12 +23,26 @@ function attachTrack(track, isLocal = false) {
             : (trackToParticipant.get(track.sid) || resolveParticipantIdForTrack(track));
           if (pid) {
             if (!isLocal) {
-              // Ensure reused audio elements start muted to avoid a burst.
-              mediaEl.muted = true;
+              const sourceHint = trackSourceBySid.get(track.sid) || track?.source;
+              const isStreamCandidate = isLikelyStreamAudioTrack(track, sourceHint);
+              // Ensure reused audio elements start muted to avoid a burst for stream audio.
+              if (isStreamCandidate) {
+                mediaEl.muted = true;
+                try { track.mediaStreamTrack.enabled = false; } catch (e) {}
+              }
               registerRemoteAudioTrack(pid, track, mediaEl);
-              try { track.mediaStreamTrack.enabled = false; } catch (e) {}
+              if (!isStreamCandidate) {
+                const entry = participantAudioSettings.get(pid);
+                if (entry) applySavedAudioSettings(pid, mediaEl);
+                else {
+                  mediaEl.volume = 1;
+                  mediaEl.muted = muteIncomingAll ? true : false;
+                }
+                try { track.mediaStreamTrack.enabled = true; } catch (e) {}
+              }
             } else {
-              applySavedAudioSettings(pid, mediaEl);
+              mediaEl.muted = true;
+              mediaEl.volume = 0;
             }
           }
         }
@@ -62,9 +76,15 @@ function attachTrack(track, isLocal = false) {
   el.playsInline = true;
 
   if (track.kind === "audio") {
-    // Start muted to avoid a brief audio burst before classification.
-    el.muted = true;
-    if (!isLocal) {
+    if (isLocal) {
+      el.muted = true;
+      el.volume = 0;
+    }
+    const sourceHint = trackSourceBySid.get(track.sid) || track?.source;
+    const isStreamCandidate = !isLocal && isLikelyStreamAudioTrack(track, sourceHint);
+    // Start muted only for stream audio to avoid a brief burst.
+    if (isStreamCandidate) {
+      el.muted = true;
       try { track.mediaStreamTrack.enabled = false; } catch (e) {}
     }
   }
@@ -97,6 +117,8 @@ function attachTrack(track, isLocal = false) {
         : (trackToParticipant.get(track.sid) || resolveParticipantIdForTrack(track));
       if (pid) {
         if (!isLocal) {
+          const sourceHint = trackSourceBySid.get(track.sid) || track?.source;
+          const isStreamCandidate = isLikelyStreamAudioTrack(track, sourceHint);
           if (muteIncomingAll) {
             el.muted = true;
           }
@@ -112,9 +134,20 @@ function attachTrack(track, isLocal = false) {
               isWatched: watchedVideoParticipants.has(pid)
             });
           } catch (e) {}
-          try { track.mediaStreamTrack.enabled = false; } catch (e) {}
+          if (!isStreamCandidate) {
+            const entry = participantAudioSettings.get(pid);
+            if (entry) applySavedAudioSettings(pid, el);
+            else {
+              el.volume = 1;
+              el.muted = muteIncomingAll ? true : false;
+            }
+            try { track.mediaStreamTrack.enabled = true; } catch (e) {}
+          } else {
+            try { track.mediaStreamTrack.enabled = false; } catch (e) {}
+          }
         } else {
-          applySavedAudioSettings(pid, el);
+          el.muted = true;
+          el.volume = 0;
         }
       }
     } catch (e) {}

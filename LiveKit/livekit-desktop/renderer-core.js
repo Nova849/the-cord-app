@@ -1319,7 +1319,7 @@ function getMicAudioPublicationsForParticipant(p) {
     return pubs.filter(pub => {
       const kind = pub?.kind || pub?.track?.kind;
       if (kind !== 'audio') return false;
-      return !isStreamAudioPublication(pub);
+      return isMicrophonePublication(pub);
     });
   } catch (e) {}
   return [];
@@ -1430,6 +1430,7 @@ function setParticipantStreamAudioSubscribed(participantId, subscribe) {
     })) });
     pubs.forEach(pub => {
       if (!isStreamAudioPublication(pub)) return;
+      if (isMicrophonePublication(pub)) return;
       if (pub && typeof pub.setSubscribed === 'function') {
         pub.setSubscribed(subscribe);
       }
@@ -2118,14 +2119,14 @@ function isScreenShareAudioStrict(track, sourceOverride) {
     const rawSource = sourceOverride ?? track?.source;
     if (typeof rawSource === 'string') {
       const source = rawSource.toLowerCase();
-      return source.includes('screen_share_audio') || source.includes('screen-share-audio');
+      return source === 'screen_share_audio' || source === 'screen-share-audio';
     }
     if (typeof rawSource === 'number') {
       return rawSource === 4;
     }
     if (rawSource && typeof rawSource === 'object') {
       const name = typeof rawSource.name === 'string' ? rawSource.name.toLowerCase() : '';
-      return name.includes('screen_share_audio') || name.includes('screen-share-audio');
+      return name === 'screen_share_audio' || name === 'screen-share-audio';
     }
   } catch (e) {}
   return false;
@@ -2133,15 +2134,33 @@ function isScreenShareAudioStrict(track, sourceOverride) {
 
 function isLikelyStreamAudioTrack(track, sourceOverride) {
   if (isScreenShareAudioStrict(track, sourceOverride)) return true;
-  return isScreenShareAudio(track, sourceOverride);
+  try {
+    const rawSource = sourceOverride ?? track?.source;
+    if (typeof rawSource === 'number' && rawSource === 2) return false;
+    if (typeof rawSource === 'string' && rawSource.toLowerCase().includes('microphone')) return false;
+    if (rawSource && typeof rawSource === 'object' && typeof rawSource.name === 'string') {
+      if (rawSource.name.toLowerCase().includes('microphone')) return false;
+    }
+    const name = (track?.name || track?.mediaStreamTrack?.label || '').toLowerCase();
+    return name.includes('systemaudio') || name.includes('screen_share_audio');
+  } catch (e) {}
+  return false;
 }
 
 function isStreamAudioPublication(pub) {
   if (!pub) return false;
-  if (isScreenShareAudioStrict(pub?.track || {}, pub?.source)) return true;
-  const name = (pub?.trackName || pub?.name || pub?.track?.name || '').toLowerCase();
-  if (name.includes('systemaudio') || name.includes('screen_share_audio') || name.includes('screen')) return true;
-  return isScreenShareAudio(pub?.track || {}, pub?.source);
+  try {
+    const rawSource = pub?.source ?? pub?.track?.source;
+    if (typeof rawSource === 'number' && rawSource === 2) return false;
+    if (typeof rawSource === 'string' && rawSource.toLowerCase().includes('microphone')) return false;
+    if (rawSource && typeof rawSource === 'object' && typeof rawSource.name === 'string') {
+      if (rawSource.name.toLowerCase().includes('microphone')) return false;
+    }
+    if (isScreenShareAudioStrict(pub?.track || {}, rawSource)) return true;
+    const name = (pub?.trackName || pub?.name || pub?.track?.name || '').toLowerCase();
+    return name.includes('systemaudio') || name.includes('screen_share_audio');
+  } catch (e) {}
+  return false;
 }
 
 function isMicrophoneAudio(track, sourceOverride) {
@@ -2171,6 +2190,23 @@ function isMicrophoneAudio(track, sourceOverride) {
     return source.includes('microphone')
       || name.includes('mic')
       || label.includes('microphone');
+  } catch (e) {}
+  return false;
+}
+
+function isMicrophonePublication(pub) {
+  try {
+    if (!pub) return false;
+    const rawSource = pub?.source ?? pub?.track?.source;
+    if (typeof rawSource === 'number' && rawSource === 2) return true;
+    if (typeof rawSource === 'string' && rawSource.toLowerCase().includes('microphone')) return true;
+    if (rawSource && typeof rawSource === 'object' && typeof rawSource.name === 'string') {
+      if (rawSource.name.toLowerCase().includes('microphone')) return true;
+    }
+    const name = (pub?.trackName || pub?.name || pub?.track?.name || '').toLowerCase();
+    if (name.includes('microphone') || name === 'mic') return true;
+    if (isLikelyStreamAudioTrack(pub?.track || {}, rawSource)) return false;
+    return !isStreamAudioPublication(pub);
   } catch (e) {}
   return false;
 }
@@ -3114,16 +3150,21 @@ function getEnhancedVoiceFloor() {
   return 0.6 - (strength / 100) * 0.4;
 }
 
+function stopMicGateState(state) {
+  if (!state) return;
+  if (state.timer) {
+    clearInterval(state.timer);
+  }
+  try { state.source?.disconnect(); } catch (e) {}
+  try { state.analyser?.disconnect(); } catch (e) {}
+  try { state.gain?.disconnect(); } catch (e) {}
+  try { state.highpass?.disconnect(); } catch (e) {}
+  try { state.compressor?.disconnect(); } catch (e) {}
+}
+
 function stopMicGate() {
   if (!micGateState) return;
-  if (micGateState.timer) {
-    clearInterval(micGateState.timer);
-  }
-  try { micGateState.source?.disconnect(); } catch (e) {}
-  try { micGateState.analyser?.disconnect(); } catch (e) {}
-  try { micGateState.gain?.disconnect(); } catch (e) {}
-  try { micGateState.highpass?.disconnect(); } catch (e) {}
-  try { micGateState.compressor?.disconnect(); } catch (e) {}
+  stopMicGateState(micGateState);
   micGateState = null;
 }
 
@@ -3280,42 +3321,121 @@ function buildMicConstraints() {
 async function restartMicTrack() {
   if (!room) return;
   try {
-    const wasMuted = micAudioTrack ? !micAudioTrack.mediaStreamTrack.enabled : false;
-    if (micAudioTrack) {
-      await room.localParticipant.unpublishTrack(micAudioTrack);
-      detachTrack(micAudioTrack);
-      micAudioTrack.stop();
-      micAudioTrack = null;
+    const previousTrack = micAudioTrack;
+    const previousStream = micStream;
+    const previousGateState = micGateState;
+    const wasMuted = previousTrack ? !previousTrack.mediaStreamTrack.enabled : false;
+    let nextStream = null;
+    try {
+      nextStream = await navigator.mediaDevices.getUserMedia(buildMicConstraints());
+    } catch (e) {
+      console.warn('[mic] getUserMedia failed, retrying default device', e);
+      nextStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: micProcessing.echoCancellation,
+          noiseSuppression: micProcessing.noiseSuppression,
+          autoGainControl: micProcessing.autoGainControl
+        }
+      });
     }
-    stopMicGate();
-    micStream?.getTracks().forEach(t => t.stop());
-    micStream = null;
-    micStream = await navigator.mediaDevices.getUserMedia(buildMicConstraints());
-    const baseTrack = micStream.getAudioTracks()[0];
+    if (!nextStream) return;
+    const baseTrack = nextStream.getAudioTracks()[0];
+    if (!baseTrack) {
+      nextStream.getTracks().forEach(t => t.stop());
+      throw new Error('[mic] No audio tracks returned from getUserMedia');
+    }
     const processedTrack = (micProcessing.noiseGateEnabled || micProcessing.enhancedVoiceEnabled)
-      ? createProcessedMicTrack(micStream)
+      ? createProcessedMicTrack(nextStream)
       : null;
     let monoFallbackTrack = null;
     if (!processedTrack && baseTrack) {
       const channelCount = baseTrack.getSettings?.().channelCount || 0;
       if (channelCount > 1) {
-        monoFallbackTrack = createMonoMicTrack(micStream);
+        monoFallbackTrack = createMonoMicTrack(nextStream);
       }
     }
-    micAudioTrack = new LiveKit.LocalAudioTrack(processedTrack || monoFallbackTrack || baseTrack, { name: 'microphone' });
+    const nextMediaTrack = processedTrack || monoFallbackTrack || baseTrack;
     const micPublishOpts = {};
     try {
       if (LiveKit?.Track?.Source?.Microphone != null) {
         micPublishOpts.source = LiveKit.Track.Source.Microphone;
       }
     } catch (e) {}
-    await room.localParticipant.publishTrack(micAudioTrack, micPublishOpts);
-    if (micAudioTrack) {
-      if (wasMuted) micAudioTrack.mediaStreamTrack.enabled = false;
+
+    const micPub = (() => {
+      try {
+        if (LiveKit?.Track?.Source?.Microphone != null) {
+          return room?.localParticipant?.getTrackPublication(LiveKit.Track.Source.Microphone);
+        }
+      } catch (e) {}
+      return null;
+    })();
+
+    if (micPub?.track) {
+      const previousMediaTrack = micPub.track.mediaStreamTrack;
+      try {
+        await micPub.track.replaceTrack(nextMediaTrack, { userProvidedTrack: true });
+      } catch (e) {
+        console.warn('[mic] replaceTrack failed, keeping previous track', e);
+        try { nextStream.getTracks().forEach(t => t.stop()); } catch (err) {}
+        if (micGateState && micGateState !== previousGateState) {
+          stopMicGateState(micGateState);
+        }
+        micGateState = previousGateState;
+        return;
+      }
+      micStream = nextStream;
+      micAudioTrack = micPub.track;
+      micAudioTrack.mediaStreamTrack.enabled = wasMuted ? false : true;
       attachTrack(micAudioTrack, true);
       const localId = room?.localParticipant?.identity || room?.localParticipant?.sid;
       if (localId) connectParticipantMeter(localId, micAudioTrack);
+      if (previousMediaTrack && previousMediaTrack !== micAudioTrack.mediaStreamTrack) {
+        try { previousMediaTrack.stop(); } catch (e) {}
+      }
+      if (previousStream && previousStream !== nextStream) {
+        try { previousStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+      }
+      if (previousGateState && previousGateState !== micGateState) {
+        stopMicGateState(previousGateState);
+      }
+      return;
     }
+
+    const nextTrack = new LiveKit.LocalAudioTrack(nextMediaTrack, { name: 'microphone' });
+    try {
+      await room.localParticipant.publishTrack(nextTrack, micPublishOpts);
+    } catch (e) {
+      console.warn('[mic] publishTrack failed', e);
+      try { nextTrack.stop(); } catch (err) {}
+      try { nextStream.getTracks().forEach(t => t.stop()); } catch (err) {}
+      if (micGateState && micGateState !== previousGateState) {
+        stopMicGateState(micGateState);
+      }
+      micGateState = previousGateState;
+      return;
+    }
+    if (previousTrack) {
+      try {
+        await room.localParticipant.unpublishTrack(previousTrack);
+      } catch (e) {
+        console.warn('[mic] unpublishTrack failed (continuing)', e);
+      }
+      try { detachTrack(previousTrack); } catch (e) {}
+      try { previousTrack.stop(); } catch (e) {}
+    }
+    if (previousStream) {
+      try { previousStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    }
+    if (previousGateState && previousGateState !== micGateState) {
+      stopMicGateState(previousGateState);
+    }
+    micStream = nextStream;
+    micAudioTrack = nextTrack;
+    micAudioTrack.mediaStreamTrack.enabled = wasMuted ? false : true;
+    attachTrack(micAudioTrack, true);
+    const localId = room?.localParticipant?.identity || room?.localParticipant?.sid;
+    if (localId) connectParticipantMeter(localId, micAudioTrack);
   } catch (e) {
     console.warn("restartMicTrack error", e);
   }

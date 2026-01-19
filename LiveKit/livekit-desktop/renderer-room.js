@@ -769,21 +769,32 @@ async function leaveRoom() {
   try { room && room.removeAllListeners && room.removeAllListeners(); } catch (e) {}
   if (screenVideoTrack) {
     logInfo('[stream] unpublishing screen video track (leave)', { trackSid: screenVideoTrack?.sid });
-    await room.localParticipant.unpublishTrack(screenVideoTrack);
-    screenVideoTrack.stop();
+    try { await room.localParticipant.unpublishTrack(screenVideoTrack); } catch (e) {
+      console.warn('[stream] unpublish screen video failed (continuing)', e);
+    }
+    try { screenVideoTrack.stop(); } catch (e) {}
   }
   if (screenAudioTrack) {
-    await room.localParticipant.unpublishTrack(screenAudioTrack);
-    screenAudioTrack.stop();
+    try { await room.localParticipant.unpublishTrack(screenAudioTrack); } catch (e) {
+      console.warn('[stream] unpublish screen audio failed (continuing)', e);
+    }
+    try { screenAudioTrack.stop(); } catch (e) {}
   }
   if (micAudioTrack) {
-    await room.localParticipant.unpublishTrack(micAudioTrack);
-    micAudioTrack.stop();
+    try { await room.localParticipant.unpublishTrack(micAudioTrack); } catch (e) {
+      console.warn('[mic] unpublish failed (continuing)', e);
+    }
+    try { micAudioTrack.stop(); } catch (e) {}
   }
 
   stopMicGate();
   micStream?.getTracks().forEach(t => t.stop());
   screenStream?.getTracks().forEach(t => t.stop());
+  micStream = null;
+  screenStream = null;
+  micAudioTrack = null;
+  screenVideoTrack = null;
+  screenAudioTrack = null;
 
   setLocalStreamAttributes({
     stream_resolution: '',
@@ -805,8 +816,10 @@ async function leaveRoom() {
   participantAudioEls.clear();
   participantAudioControls.clear();
   participantListAudioControls.clear();
+  participantAudioTracks.clear();
   participantQuality.clear();
   trackToParticipant.clear();
+  trackSourceBySid.clear();
   participantStreamInfo.clear();
   participantWatchControls.clear();
   participantsById.clear();
@@ -816,6 +829,7 @@ async function leaveRoom() {
   participantStreamAudioControls.clear();
   participantStreamAudioSettings.clear();
   participantMeters.clear();
+  participantStreamMeters.clear();
   participantAnalyzers.clear();
   participantMeterRaf.clear();
   updateMinimizedPanelVisibility();
