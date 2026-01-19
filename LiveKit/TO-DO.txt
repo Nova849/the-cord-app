@@ -1,5 +1,5 @@
 --Angelo Test-- 
-
+If watching full screen on one monitor, it's always has the overlay on
 
 
 

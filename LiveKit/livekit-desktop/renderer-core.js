@@ -1436,10 +1436,6 @@ function setParticipantStreamAudioSubscribed(participantId, subscribe) {
       }
       if (!subscribe && pub?.track) {
         detachTrack(pub.track);
-        const trackSid = pub?.trackSid || pub?.track?.sid;
-        if (trackSid && room && typeof room.unsubscribe === 'function') {
-          room.unsubscribe(trackSid).catch(() => {});
-        }
       } else if (subscribe && pub?.track) {
         attachTrack(pub.track);
         try { pub.track.mediaStreamTrack.enabled = true; } catch (e) {}
@@ -1522,9 +1518,6 @@ function setParticipantVideoSubscribed(participantId, subscribe, trackSidOverrid
       stored.forEach(pub => {
         if (pub && !pubs.includes(pub)) pubs.push(pub);
       });
-      if (trackSidOverride && room && typeof room.unsubscribe === 'function') {
-        room.unsubscribe(trackSidOverride).catch(() => {});
-      }
     }
     if (subscribe && pubs.length === 0) {
       const stored = participantVideoPubs.get(participantId) || [];
@@ -1565,16 +1558,6 @@ function setParticipantVideoSubscribed(participantId, subscribe, trackSidOverrid
       };
       if (pub && typeof pub.setSubscribed === 'function') {
         pub.setSubscribed(subscribe);
-      }
-      if (!subscribe && trackSid && room && typeof room.unsubscribe === 'function') {
-        room.unsubscribe(trackSid).catch(() => {});
-      }
-      if (subscribe && trackSid) {
-        if (room && typeof room.subscribe === 'function') {
-          room.subscribe(trackSid).catch(err => console.warn('[watch] room.subscribe err', err));
-        } else if (typeof p.subscribe === 'function') {
-          p.subscribe(trackSid).catch(err => console.warn('[watch] participant.subscribe err', err));
-        }
       }
       if (!subscribe && pub?.track) {
         detachTrack(pub.track);
@@ -3158,6 +3141,10 @@ function stopMicGateState(state) {
   try { state.source?.disconnect(); } catch (e) {}
   try { state.analyser?.disconnect(); } catch (e) {}
   try { state.gain?.disconnect(); } catch (e) {}
+  try { state.splitter?.disconnect(); } catch (e) {}
+  try { state.merger?.disconnect(); } catch (e) {}
+  try { state.gainL?.disconnect(); } catch (e) {}
+  try { state.gainR?.disconnect(); } catch (e) {}
   try { state.highpass?.disconnect(); } catch (e) {}
   try { state.compressor?.disconnect(); } catch (e) {}
 }
@@ -3260,9 +3247,41 @@ function createMonoMicTrack(stream) {
     gain.channelInterpretation = 'speakers';
     gain.gain.value = 1;
     const dest = ctx.createMediaStreamDestination();
-    source.connect(gain);
+    let splitter = null;
+    let merger = null;
+    let gainL = null;
+    let gainR = null;
+    const settings = stream.getAudioTracks()[0]?.getSettings?.();
+    const channelCount = settings?.channelCount || 0;
+    if (channelCount > 1) {
+      splitter = ctx.createChannelSplitter(2);
+      merger = ctx.createChannelMerger(1);
+      gainL = ctx.createGain();
+      gainR = ctx.createGain();
+      gainL.gain.value = 0.5;
+      gainR.gain.value = 0.5;
+      source.connect(splitter);
+      splitter.connect(gainL, 0);
+      splitter.connect(gainR, 1);
+      gainL.connect(merger, 0, 0);
+      gainR.connect(merger, 0, 0);
+      merger.connect(gain);
+    } else {
+      source.connect(gain);
+    }
     gain.connect(dest);
-    micGateState = { source, analyser: null, gain, timer: null, highpass: null, compressor: null };
+    micGateState = {
+      source,
+      analyser: null,
+      gain,
+      timer: null,
+      highpass: null,
+      compressor: null,
+      splitter,
+      merger,
+      gainL,
+      gainR
+    };
     const track = dest.stream.getAudioTracks()[0];
     return track || null;
   } catch (e) {

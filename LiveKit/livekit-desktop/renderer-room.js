@@ -108,8 +108,10 @@ joinBtn.onclick = async () => {
           if (publication?.trackSid) trackSourceBySid.set(publication.trackSid, publication.source);
         }
       if (track?.kind === 'audio') {
-          // Prevent any brief playback before classification.
-          try { track.mediaStreamTrack.enabled = false; } catch (e) {}
+          if (isStreamAudioPublication(publication)) {
+            // Prevent any brief playback before classification for stream audio.
+            try { track.mediaStreamTrack.enabled = false; } catch (e) {}
+          }
           try {
             const label = track?.mediaStreamTrack?.label || '';
             const rawSource = publication?.source;
@@ -148,7 +150,10 @@ joinBtn.onclick = async () => {
   });
   room.on(LiveKit.RoomEvent.TrackUnsubscribed, track => {
     try {
-      if (track?.sid) trackSourceBySid.delete(track.sid);
+      if (track?.sid) {
+        trackSourceBySid.delete(track.sid);
+        trackToParticipant.delete(track.sid);
+      }
       if (track?.kind === 'video') {
         logInfo('[video] unsubscribed', { trackSid: track?.sid });
       }

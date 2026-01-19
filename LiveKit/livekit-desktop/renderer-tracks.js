@@ -402,6 +402,9 @@ function cleanupStreamTiles(participantId, trackSid, removeAllForParticipant) {
 
 /* ---------- DETACH TRACK ---------- */
 function detachTrack(track) {
+  if (track?.sid) {
+    try { trackToParticipant.delete(track.sid); } catch (e) {}
+  }
   const el = streamsDiv.querySelector(`[data-sid="${track.sid}"]`);
   if (el) {
     if (track.kind === 'video') {

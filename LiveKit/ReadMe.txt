@@ -99,3 +99,13 @@ Notes
 -----
 - If you see a 404 update error, the file names in latest.yml must match the
   uploaded assets exactly.
+
+Audio + Streaming sanity checklist
+----------------------------------
+Run this quick pass after changes to audio/streaming:
+1) Join with two clients.
+2) Speak and confirm the other client hears mic audio immediately.
+3) Switch input device while joined; mic continues and VU moves.
+4) Start a stream; other client sees tile + can Watch/Stop without breaking mic.
+5) Stop stream; tile cleans up and participant controls still work.
+6) Leave + rejoin; mic audio works without needing a stream.
