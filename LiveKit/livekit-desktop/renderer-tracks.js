@@ -226,8 +226,9 @@ function attachTrack(track, isLocal = false) {
 
 function startSenderStatsLogging(sender, label) {
   if (!sender || senderStatsTimer) return;
-  let lastBytes = 0;
+  let lastBytesTotal = 0;
   let lastTs = 0;
+  let lastKbps = null;
   let lastCodec = '';
   let loggedSummary = false;
   let lastAvailable = 0;
@@ -254,7 +255,6 @@ function startSenderStatsLogging(sender, label) {
           }
         }
         if (report.type !== 'outbound-rtp' || report.isRemote) return;
-        if (!report.bytesSent || !report.timestamp) return;
         try {
           if (report.codecId && typeof stats.get === 'function') {
             const codec = stats.get(report.codecId);
@@ -265,34 +265,56 @@ function startSenderStatsLogging(sender, label) {
             }
           }
         } catch (e) {}
-        if (lastTs) {
-          const bytesDelta = report.bytesSent - lastBytes;
-          const timeDelta = (report.timestamp - lastTs) / 1000;
-          if (timeDelta > 0) {
-            const bps = (bytesDelta * 8) / timeDelta;
-            debug(`${label} send bitrate: ${(bps / 1e6).toFixed(2)} Mbps`);
+      });
+      // Aggregate outbound video bitrate across all video RTP reports
+      let totalBytes = 0;
+      let latestTs = 0;
+      stats.forEach(report => {
+        if (report.type !== 'outbound-rtp' || report.isRemote) return;
+        const kind = report.kind || report.mediaType;
+        if (kind !== 'video') return;
+        if (typeof report.bytesSent !== 'number') return;
+        totalBytes += report.bytesSent;
+        if (typeof report.timestamp === 'number' && report.timestamp > latestTs) {
+          latestTs = report.timestamp;
+        }
+      });
+      if (latestTs && lastTs && totalBytes >= lastBytesTotal) {
+        const bytesDelta = totalBytes - lastBytesTotal;
+        const timeDelta = (latestTs - lastTs) / 1000;
+        if (timeDelta > 0) {
+          const bps = (bytesDelta * 8) / timeDelta;
+          const kbps = bps / 1000;
+          if (Number.isFinite(kbps)) {
+            lastKbps = kbps;
+            debug(`${label} send bitrate: ${kbps.toFixed(1)} kbps`);
             try {
-              currentStreamSendMbps = bps / 1e6;
+              currentStreamSendKbps = kbps;
               const res = currentStreamSettings.res || 'unknown';
               const fps = currentStreamSettings.fps || 'unknown';
               const maxKbps = currentStreamSettings.maxKbps || 'unknown';
               const codec = lastCodec || 'unknown';
-              setStreamStatus(`Stream: ${res} | ${fps} fps | max ${maxKbps} kbps | codec ${codec} | send ${(bps / 1e6).toFixed(2)} Mbps`);
+              setStreamStatus(`Stream: ${res} | ${fps} fps | max ${maxKbps} kbps | codec ${codec} | send ${Math.round(kbps)} kbps`);
               const localId = room?.localParticipant?.identity || room?.localParticipant?.sid;
               if (localId) updateStreamNameLabel(localId);
             } catch (e) {}
           }
         }
-        lastBytes = report.bytesSent;
-        lastTs = report.timestamp;
-      });
+      } else if (lastKbps != null && latestTs && totalBytes < lastBytesTotal) {
+        // Stats reset (track restart); keep previous display until next valid sample.
+        debug(`${label} send bitrate reset detected`);
+      }
+      if (latestTs) {
+        lastBytesTotal = totalBytes;
+        lastTs = latestTs;
+      }
     } catch (e) {}
   }, 1000);
 }
 
 function configureScreenSender(sender) {
-  if (!sender || screenSenderConfigured) return;
-  screenSenderConfigured = true;
+  if (!sender || screenSenderConfigured || screenSenderConfigInFlight) return;
+  screenSenderConfigInFlight = true;
   try {
     const params = sender.getParameters();
     debug('Screen sender params before:', params);
@@ -306,6 +328,7 @@ function configureScreenSender(sender) {
     params.degradationPreference = 'maintain-framerate';
     sender.setParameters(params).then(() => {
       try {
+        screenSenderConfigured = true;
         const applied = sender.getParameters();
         debug('Screen sender params applied:', applied);
         try {
@@ -322,8 +345,15 @@ function configureScreenSender(sender) {
       } catch (e) {}
     }).catch(e => {
       console.warn('Screen sender setParameters failed:', e);
+      screenSenderConfigured = false;
+    }).finally(() => {
+      screenSenderConfigInFlight = false;
     });
-  } catch (e) {}
+  } catch (e) {
+    console.warn('Screen sender configuration failed:', e);
+    screenSenderConfigInFlight = false;
+    screenSenderConfigured = true;
+  }
   startSenderStatsLogging(sender, 'Screen share');
 }
 
@@ -372,7 +402,7 @@ function stopSenderStatsLogging() {
   if (!senderStatsTimer) return;
   clearInterval(senderStatsTimer);
   senderStatsTimer = null;
-  currentStreamSendMbps = null;
+  currentStreamSendKbps = null;
   try {
     const localId = room?.localParticipant?.identity || room?.localParticipant?.sid;
     if (localId) updateStreamNameLabel(localId);
@@ -401,23 +431,25 @@ function cleanupStreamTiles(participantId, trackSid, removeAllForParticipant) {
 }
 
 /* ---------- DETACH TRACK ---------- */
-function detachTrack(track) {
+function detachTrack(track, participantIdOverride = null) {
+  const pid = participantIdOverride
+    || (track?.sid ? (trackToParticipant.get(track.sid) || resolveParticipantIdForTrack(track)) : null);
   if (track?.sid) {
     try { trackToParticipant.delete(track.sid); } catch (e) {}
   }
   const el = streamsDiv.querySelector(`[data-sid="${track.sid}"]`);
   if (el) {
     if (track.kind === 'video') {
-      const pid = el.dataset.participantId;
+      const tilePid = el.dataset.participantId || pid;
       const isLocalTile = el.dataset.local === 'true';
       if (isLocalTile) {
         el.remove();
-      } else if (pid && !watchedVideoParticipants.has(pid)) {
+      } else if (tilePid && !watchedVideoParticipants.has(tilePid)) {
         const mediaEl = el.querySelector('video');
         if (mediaEl) mediaEl.srcObject = null;
         if (!el.classList.contains('placeholder')) {
           el.classList.add('placeholder');
-          ensureWatchOverlay(el, pid);
+          ensureWatchOverlay(el, tilePid);
           const fsBtn = el.querySelector('.fullscreen-btn');
           if (fsBtn) fsBtn.style.display = 'none';
         }
@@ -431,7 +463,6 @@ function detachTrack(track) {
   }
   if (track && track.kind === 'video' && minimizedTiles.has(track.sid)) {
     try {
-      const pid = trackToParticipant.get(track.sid) || resolveParticipantIdForTrack(track);
       if (pid) ensureMinimizedPlaceholder(pid, track.sid);
     } catch (e) {}
   }
@@ -446,10 +477,7 @@ function detachTrack(track) {
   }
   if (track && track.kind === 'audio') {
     try {
-      const pid = trackToParticipant.get(track.sid) || resolveParticipantIdForTrack(track);
-      if (pid) {
-        unregisterRemoteAudioTrack(pid, track);
-      }
+      if (pid) unregisterRemoteAudioTrack(pid, track);
     } catch (e) {}
   }
   minimizedTiles.delete(track.sid);

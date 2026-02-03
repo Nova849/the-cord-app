@@ -11,6 +11,18 @@ if (!localStorage.getItem(settingsKey)) {
   window.electronAPI?.getAppVersion?.()
     .then((res) => setUpdateVersion(res?.ok ? res.version : ''))
     .catch(() => setUpdateVersion(''));
+  const applyServerUrlFallback = () => {
+    if (serverUrlInput && !serverUrlInput.value && LIVEKIT_URL) {
+      serverUrlInput.value = LIVEKIT_URL;
+    }
+  };
+  window.electronAPI?.getConfig?.()
+    .then((res) => {
+      const next = String(res?.livekitServerUrl || '').trim();
+      if (next) LIVEKIT_URL = next;
+      applyServerUrlFallback();
+    })
+    .catch(() => {});
   updateHotkeyDisplay();
   applyGlobalMuteHotkey();
   loadParticipantAudioSettings();
@@ -19,7 +31,7 @@ applyChatWidth(desiredChatWidth);
 applyChatCollapsed(chatCollapsed);
 updateHotkeyDisplay();
 updateResponsiveChat();
-if (serverUrlInput && !serverUrlInput.value) serverUrlInput.value = LIVEKIT_URL;
+applyServerUrlFallback();
 if (jwtInput) jwtInput.focus();
 applyRecommendedBitrate();
 refreshSources();
@@ -108,7 +120,10 @@ inputDeviceSelect?.addEventListener("change", async () => {
   desiredInputDeviceId = inputDeviceSelect.value || 'default';
   saveSettings();
   if (room && room.state && room.state !== 'disconnected') {
-    await restartMicTrack();
+    const ok = await restartMicTrack();
+    if (!ok) {
+      console.warn('[mic] failed to restart microphone after device change');
+    }
   }
 });
 playbackDeviceSelect?.addEventListener("mousedown", refreshPlaybackDevices);

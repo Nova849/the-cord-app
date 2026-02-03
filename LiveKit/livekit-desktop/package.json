@@ -1,11 +1,19 @@
 {
   "name": "livekit-desktop",
-  "version": "1.0.5",
+  "version": "1.0.7",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder"
+    "dist": "electron-builder",
+    "test": "npm run test:all",
+    "test:watch": "vitest",
+    "test:ci": "vitest run",
+    "test:e2e": "node e2e/run-full.cjs",
+    "test:e2e:live": "node e2e/run-live.cjs",
+    "test:all": "npm run test:unit && npm run test:e2e",
+    "test:unit": "vitest run",
+    "test:e2e:smoke": "node e2e/run-smoke.cjs"
   },
   "dependencies": {
     "electron-updater": "^6.3.0",
@@ -14,7 +22,9 @@
   "description": "",
   "devDependencies": {
     "electron": "^39.2.7",
-    "electron-builder": "^26.4.0"
+    "electron-builder": "^26.4.0",
+    "jsdom": "^24.0.0",
+    "vitest": "^1.6.0"
   },
   "build": {
     "appId": "com.thecord.app",

@@ -1,4 +1,318 @@
-﻿/* ---------- JOIN ROOM ---------- */
+﻿const roomLogic = window.TheCordLogic || {};
+const SCREEN_STALL_TIMEOUT_MS = 4000;
+const SCREEN_WARMUP_TIMEOUT_MS = 300;
+const SCREEN_STALL_MESSAGE = 'Screen share stalled. Click Stop Stream then Start Stream to restart.';
+const SYSTEM_AUDIO_WARNING_MESSAGE = 'System audio unavailable; streaming video only.';
+let screenHealthTimer = null;
+let screenHealthWarningActive = false;
+let systemAudioWarningActive = false;
+let micSubscriptionSweepTimer = null;
+
+function stopMicSubscriptionSweep() {
+  if (!micSubscriptionSweepTimer) return;
+  clearInterval(micSubscriptionSweepTimer);
+  micSubscriptionSweepTimer = null;
+}
+
+function ensureAllRemoteMicsSubscribed(reason = '') {
+  try {
+    if (!room || room.state !== 'connected') return false;
+    let did = false;
+    if (room.remoteParticipants) {
+      const vals = typeof room.remoteParticipants.values === 'function'
+        ? Array.from(room.remoteParticipants.values())
+        : (Array.isArray(room.remoteParticipants) ? room.remoteParticipants : []);
+      vals.forEach(p => {
+        const id = p?.identity || p?.sid;
+        if (!id) return;
+        if (typeof ensureParticipantMicSubscribed === 'function') {
+          if (ensureParticipantMicSubscribed(id)) did = true;
+        }
+      });
+    }
+    return did;
+  } catch (e) {}
+  return false;
+}
+
+function startMicSubscriptionSweep(reason = '') {
+  if (micSubscriptionSweepTimer) return;
+  let attempts = 0;
+  micSubscriptionSweepTimer = setInterval(() => {
+    attempts += 1;
+    const did = ensureAllRemoteMicsSubscribed(reason);
+    if (did || attempts >= 6 || !room || room.state !== 'connected') {
+      stopMicSubscriptionSweep();
+    }
+  }, 800);
+}
+
+function clearScreenHealthTimer() {
+  if (screenHealthTimer) {
+    clearTimeout(screenHealthTimer);
+    screenHealthTimer = null;
+  }
+}
+
+function clearScreenHealthWarning() {
+  if (!screenHealthWarningActive) return;
+  try {
+    if (typeof errorBanner !== 'undefined' && errorBanner?.textContent === SCREEN_STALL_MESSAGE) {
+      setErrorBanner('');
+    }
+  } catch (e) {}
+  screenHealthWarningActive = false;
+  if (systemAudioWarningActive) {
+    setSystemAudioWarning(true);
+  }
+}
+
+function setScreenHealthWarning(active) {
+  if (active) {
+    try {
+      if (typeof errorBanner !== 'undefined'
+        && errorBanner?.textContent
+        && errorBanner.textContent !== SCREEN_STALL_MESSAGE
+        && errorBanner.textContent !== SYSTEM_AUDIO_WARNING_MESSAGE) {
+        return;
+      }
+    } catch (e) {}
+    screenHealthWarningActive = true;
+    setErrorBanner(SCREEN_STALL_MESSAGE);
+    return;
+  }
+  clearScreenHealthWarning();
+}
+
+function clearSystemAudioWarning() {
+  if (!systemAudioWarningActive) return;
+  try {
+    if (typeof errorBanner !== 'undefined' && errorBanner?.textContent === SYSTEM_AUDIO_WARNING_MESSAGE) {
+      setErrorBanner('');
+    }
+  } catch (e) {}
+  systemAudioWarningActive = false;
+}
+
+function setSystemAudioWarning(active) {
+  if (active) {
+    try {
+      if (typeof errorBanner !== 'undefined' && errorBanner?.textContent && errorBanner.textContent !== SYSTEM_AUDIO_WARNING_MESSAGE) {
+        return;
+      }
+    } catch (e) {}
+    systemAudioWarningActive = true;
+    setErrorBanner(SYSTEM_AUDIO_WARNING_MESSAGE);
+    return;
+  }
+  clearSystemAudioWarning();
+}
+
+function scheduleScreenHealthCheck(track) {
+  clearScreenHealthTimer();
+  screenHealthTimer = setTimeout(() => {
+    screenHealthTimer = null;
+    try {
+      if (!isStreaming) return;
+      if (!screenVideoTrack || screenVideoTrack.mediaStreamTrack !== track) return;
+      if (track?.readyState !== 'live' || track?.muted) {
+        setScreenHealthWarning(true);
+      }
+    } catch (e) {}
+  }, SCREEN_STALL_TIMEOUT_MS);
+}
+
+function handleScreenVideoTrackEnded(track) {
+  try {
+    if (!isStreaming) return;
+    if (!screenVideoTrack || screenVideoTrack.mediaStreamTrack !== track) return;
+  } catch (e) {}
+  clearScreenHealthTimer();
+  clearScreenHealthWarning();
+  stopStreaming().catch(e => console.warn('[stream] stopStreaming after track end failed', e));
+}
+
+async function stopScreenAudioOnly(reason) {
+  if (!screenAudioTrack) return;
+  const track = screenAudioTrack;
+  screenAudioTrack = null;
+  try {
+    if (room?.localParticipant?.unpublishTrack) {
+      await room.localParticipant.unpublishTrack(track);
+    }
+  } catch (e) {
+    console.warn('[stream] unpublish screen audio failed', e);
+  }
+  try { track.stop(); } catch (e) {}
+  try { detachTrack(track); } catch (e) {}
+  unregisterLocalTrack('screenAudio', track);
+  muteSystemBtn.disabled = true;
+  muteSystemBtn.style.display = 'none';
+  if (isStreaming) setSystemAudioWarning(true);
+  if (reason) {
+    logInfo('[stream] screen audio stopped', { reason });
+  }
+}
+
+function wireScreenTrackEvents(track) {
+  try {
+    const mediaTrack = track?.mediaStreamTrack;
+    if (!mediaTrack) return;
+    mediaTrack.onended = () => {
+      console.warn('[stream] screen video track ended', {
+        readyState: mediaTrack.readyState,
+        label: mediaTrack.label
+      });
+      handleScreenVideoTrackEnded(mediaTrack);
+    };
+    mediaTrack.onmute = () => {
+      logInfo('[stream] screen video track muted', { readyState: mediaTrack.readyState });
+      scheduleScreenHealthCheck(mediaTrack);
+    };
+    mediaTrack.onunmute = () => {
+      logInfo('[stream] screen video track unmuted', { readyState: mediaTrack.readyState });
+      clearScreenHealthTimer();
+      clearScreenHealthWarning();
+    };
+  } catch (e) {}
+}
+
+function wireScreenAudioEvents(track) {
+  try {
+    const mediaTrack = track?.mediaStreamTrack;
+    if (!mediaTrack) return;
+    mediaTrack.onended = () => {
+      console.warn('[stream] screen audio track ended', {
+        readyState: mediaTrack.readyState,
+        label: mediaTrack.label
+      });
+      stopScreenAudioOnly('track ended').catch(e => console.warn('[stream] stop screen audio failed', e));
+    };
+    mediaTrack.onmute = () => {
+      logInfo('[stream] screen audio track muted', { readyState: mediaTrack.readyState });
+    };
+    mediaTrack.onunmute = () => {
+      logInfo('[stream] screen audio track unmuted', { readyState: mediaTrack.readyState });
+    };
+  } catch (e) {}
+}
+
+function getLocalScreenVideoPublication() {
+  try {
+    const participant = room?.localParticipant;
+    if (!participant) return null;
+    const pubs = participant.videoTrackPublications
+      ? Array.from(participant.videoTrackPublications.values ? participant.videoTrackPublications.values() : participant.videoTrackPublications)
+      : [];
+    let pub = pubs.find(p => p?.track === screenVideoTrack);
+    if (!pub) {
+      pub = pubs.find(p => {
+        const rawSource = p?.source ?? p?.track?.source;
+        if (rawSource === LiveKit?.Track?.Source?.ScreenShare) return true;
+        if (typeof rawSource === 'string' && rawSource.toLowerCase().includes('screen')) return true;
+        const name = (p?.trackName || p?.name || p?.track?.name || '').toLowerCase();
+        return name.includes('screen');
+      });
+    }
+    if (pub) return pub;
+    try {
+      if (LiveKit?.Track?.Source?.ScreenShare != null && participant.getTrackPublication) {
+        return participant.getTrackPublication(LiveKit.Track.Source.ScreenShare) || null;
+      }
+    } catch (e) {}
+  } catch (e) {}
+  return null;
+}
+
+function getLocalScreenAudioPublication() {
+  try {
+    const participant = room?.localParticipant;
+    if (!participant) return null;
+    const pubs = participant.audioTrackPublications
+      ? Array.from(participant.audioTrackPublications.values ? participant.audioTrackPublications.values() : participant.audioTrackPublications)
+      : [];
+    let pub = pubs.find(p => p?.track === screenAudioTrack);
+    if (!pub) {
+      pub = pubs.find(p => {
+        const rawSource = p?.source ?? p?.track?.source;
+        if (rawSource === LiveKit?.Track?.Source?.ScreenShareAudio) return true;
+        if (typeof rawSource === 'string' && rawSource.toLowerCase().includes('screen')) return true;
+        const name = (p?.trackName || p?.name || p?.track?.name || '').toLowerCase();
+        return name.includes('system') || name.includes('screen');
+      });
+    }
+    if (pub) return pub;
+    try {
+      if (LiveKit?.Track?.Source?.ScreenShareAudio != null && participant.getTrackPublication) {
+        return participant.getTrackPublication(LiveKit.Track.Source.ScreenShareAudio) || null;
+      }
+    } catch (e) {}
+  } catch (e) {}
+  return null;
+}
+
+async function handleScreenShareReconnect() {
+  try {
+    if (!isStreaming || !screenVideoTrack || !room?.localParticipant) return;
+    screenSenderConfigured = false;
+    screenSenderConfigInFlight = false;
+    clearScreenHealthWarning();
+    let screenPub = getLocalScreenVideoPublication();
+    if (!screenPub) {
+      const height = screenVideoTrack.mediaStreamTrack?.getSettings?.()?.height;
+      const simulcastLayers = getScreenSimulcastLayers(height);
+      const bitrate = desiredScreenMaxBitrate || Number(bitrateInput.value) * 1000;
+      const fps = desiredScreenMaxFramerate || getSelectedFps();
+      try {
+        screenPub = await room.localParticipant.publishTrack(screenVideoTrack, {
+          simulcast: simulcastLayers.length > 0,
+          source: LiveKit.Track.Source.ScreenShare,
+          videoEncoding: { maxBitrate: bitrate, maxFramerate: fps },
+          videoSimulcastLayers: simulcastLayers.length > 0 ? simulcastLayers : undefined,
+          videoCodec: 'vp8'
+        });
+        logInfo('[stream] republished screen video after reconnect', {
+          pubSid: screenPub?.trackSid,
+          trackSid: screenVideoTrack?.sid
+        });
+      } catch (e) {
+        console.warn('[stream] republish screen video failed after reconnect', e);
+        setErrorBanner('Screen share lost during reconnect. Click Start Stream to resume.');
+        await stopStreaming();
+        return;
+      }
+    }
+    if (screenPub) {
+      configureScreenSender(screenPub?.sender);
+      waitForScreenSender(screenPub, 'Screen share');
+    }
+    if (screenAudioTrack) {
+      const audioPub = getLocalScreenAudioPublication();
+      if (!audioPub) {
+        const screenAudioOpts = {};
+        try {
+          if (LiveKit?.Track?.Source?.ScreenShareAudio != null) {
+            screenAudioOpts.source = LiveKit.Track.Source.ScreenShareAudio;
+          }
+        } catch (e) {}
+        try {
+          await room.localParticipant.publishTrack(screenAudioTrack, screenAudioOpts);
+          clearSystemAudioWarning();
+          muteSystemBtn.disabled = false;
+          muteSystemBtn.style.display = '';
+          logInfo('[stream] republished screen audio after reconnect');
+        } catch (e) {
+          console.warn('[stream] republish screen audio failed after reconnect', e);
+          await stopScreenAudioOnly('reconnect publish failed');
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[stream] handleScreenShareReconnect failed', e);
+  }
+}
+
+/* ---------- JOIN ROOM ---------- */
 joinBtn.onclick = async () => {
   if (joinBtn) joinBtn.disabled = true;
   if (room && room.state && room.state !== 'disconnected') {
@@ -10,6 +324,7 @@ joinBtn.onclick = async () => {
 
   manualDisconnect = false;
   lastJoinToken = token;
+  resetReconnectAttempts();
   saveSettings();
   localStorage.setItem("livekit_jwt", token);
   if (autoRejoinTimer) { clearTimeout(autoRejoinTimer); autoRejoinTimer = null; }
@@ -25,27 +340,47 @@ joinBtn.onclick = async () => {
     dynacast: true,
     autoSubscribe: false,
   });
+  const activeRoom = room;
+  const withActiveRoom = (handler) => (...args) => {
+    if (room !== activeRoom) return;
+    return handler(...args);
+  };
 
-  room.on(LiveKit.RoomEvent.Reconnecting, () => {
+  room.on(LiveKit.RoomEvent.Reconnecting, withActiveRoom(() => {
     setReconnectBanner(true);
-  });
-  room.on(LiveKit.RoomEvent.Reconnected, () => {
+  }));
+  room.on(LiveKit.RoomEvent.Reconnected, withActiveRoom(() => {
     setReconnectBanner(false);
+    resetReconnectAttempts();
     startPingMonitor();
     startAudioLevelMonitor();
-  });
-  room.on(LiveKit.RoomEvent.Disconnected, () => {
+    handleScreenShareReconnect().catch(e => console.warn('[stream] reconnect handler failed', e));
+    if (typeof ensureMicTrackPublished === 'function') {
+      ensureMicTrackPublished('reconnected').catch(e => console.warn('[mic] reconnect recovery failed', e));
+    }
+    startMicSubscriptionSweep('reconnected');
+  }));
+  room.on(LiveKit.RoomEvent.Disconnected, withActiveRoom(() => {
     setReconnectBanner(false);
     setJoinButtonState(false);
     stopPingMonitor();
     stopAudioLevelMonitor();
     if (!manualDisconnect) scheduleAutoRejoin();
-  });
+  }));
 
   try {
     debug('Connecting to LiveKit...');
     const url = (serverUrlInput && serverUrlInput.value.trim()) ? serverUrlInput.value.trim() : LIVEKIT_URL;
-    await room.connect(url, token);
+    let connectTimeoutId = null;
+    try {
+      const connectPromise = room.connect(url, token);
+      const timeoutPromise = new Promise((_, reject) => {
+        connectTimeoutId = setTimeout(() => reject(new Error('Connection timeout')), 10000);
+      });
+      await Promise.race([connectPromise, timeoutPromise]);
+    } finally {
+      if (connectTimeoutId) clearTimeout(connectTimeoutId);
+    }
     debug('Connected to LiveKit:', room?.localParticipant?.identity);
   } catch (e) {
     console.warn('LiveKit connect error', e);
@@ -53,11 +388,13 @@ joinBtn.onclick = async () => {
     setErrorBanner('Connection failed. Check server URL and token.');
     manualDisconnect = true;
     lastJoinToken = '';
+    resetReconnectAttempts();
     if (autoRejoinTimer) { clearTimeout(autoRejoinTimer); autoRejoinTimer = null; }
     setJoinButtonState(false);
     if (joinBtn) joinBtn.disabled = false;
     return;
   }
+  resetReconnectAttempts();
   try { renderConnectionStatus(); } catch (e) {}
   setJoinButtonState(true);
   if (joinBtn) joinBtn.disabled = false;
@@ -72,7 +409,10 @@ joinBtn.onclick = async () => {
   addParticipant(room.localParticipant);
 
   // Publish microphone (with processing controls)
-  await restartMicTrack();
+  const micOk = await restartMicTrack();
+  if (!micOk) {
+    console.warn('[mic] failed to start microphone');
+  }
   setMicMuteState(micMuted);
   if (micMuted) startMuteBroadcast();
   try {
@@ -80,7 +420,9 @@ joinBtn.onclick = async () => {
       const payload = JSON.stringify({ type: 'mic_mute', muted: !!micMuted });
       room.localParticipant.publishData(new TextEncoder().encode(payload), { reliable: true });
     }
-  } catch (e) {}
+  } catch (e) {
+    console.warn('[mic] failed to broadcast mute state', e);
+  }
   await refreshPlaybackDevices();
   applyPlaybackDeviceToAll();
   await refreshInputDevices();
@@ -94,7 +436,7 @@ joinBtn.onclick = async () => {
   if (autoGainBtn) autoGainBtn.disabled = false;
 
   // Listen for remote tracks
-  room.on(LiveKit.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+  room.on(LiveKit.RoomEvent.TrackSubscribed, withActiveRoom((track, publication, participant) => {
     try {
       // With autoSubscribe disabled, only subscribed tracks arrive here.
     if (track && participant) {
@@ -147,20 +489,20 @@ joinBtn.onclick = async () => {
     } catch (e) {}
     attachTrack(track);
     try { wireParticipantMuteListeners(participant); } catch (e) {}
-  });
-  room.on(LiveKit.RoomEvent.TrackUnsubscribed, track => {
+  }));
+  room.on(LiveKit.RoomEvent.TrackUnsubscribed, withActiveRoom((track, publication, participant) => {
     try {
       if (track?.sid) {
         trackSourceBySid.delete(track.sid);
-        trackToParticipant.delete(track.sid);
       }
       if (track?.kind === 'video') {
         logInfo('[video] unsubscribed', { trackSid: track?.sid });
       }
     } catch (e) {}
-    detachTrack(track);
-  });
-  room.on(LiveKit.RoomEvent.TrackMuted, (publication, participant) => {
+    const pid = participant?.identity || participant?.sid || null;
+    detachTrack(track, pid);
+  }));
+  room.on(LiveKit.RoomEvent.TrackMuted, withActiveRoom((publication, participant) => {
     try {
       if (!participant || !publication) return;
       if ((publication.kind || publication.track?.kind) !== 'audio') return;
@@ -169,8 +511,8 @@ joinBtn.onclick = async () => {
       if (!id) return;
       setParticipantMutedVisual(id, true);
     } catch (e) {}
-  });
-  room.on(LiveKit.RoomEvent.TrackUnmuted, (publication, participant) => {
+  }));
+  room.on(LiveKit.RoomEvent.TrackUnmuted, withActiveRoom((publication, participant) => {
     try {
       if (!participant || !publication) return;
       if ((publication.kind || publication.track?.kind) !== 'audio') return;
@@ -179,8 +521,8 @@ joinBtn.onclick = async () => {
       if (!id) return;
       setParticipantMutedVisual(id, false);
     } catch (e) {}
-  });
-  room.on(LiveKit.RoomEvent.TrackPublished, (publication, participant) => {
+  }));
+  room.on(LiveKit.RoomEvent.TrackPublished, withActiveRoom((publication, participant) => {
     try {
       if (!participant) return;
       const id = participant.identity || participant.sid;
@@ -204,7 +546,14 @@ joinBtn.onclick = async () => {
           setParticipantMutedVisual(id, getPublicationMuted(publication));
         }
         if (isStreamAudio && !watchedVideoParticipants.has(id) && publication?.track) {
-          detachTrack(publication.track);
+          detachTrack(publication.track, id);
+        }
+        if (publication?.track) {
+          const shouldAttach = !isStreamAudio || watchedVideoParticipants.has(id);
+          if (shouldAttach) {
+            try { trackToParticipant.set(publication.track.sid, id); } catch (e) {}
+            attachTrack(publication.track);
+          }
         }
         if (publication?.track?.sid && publication?.source) {
           const list = participantAudioTracks.get(id);
@@ -238,8 +587,8 @@ joinBtn.onclick = async () => {
         });
       }
     } catch (e) {}
-  });
-  room.on(LiveKit.RoomEvent.TrackUnpublished, (publication, participant) => {
+  }));
+  room.on(LiveKit.RoomEvent.TrackUnpublished, withActiveRoom((publication, participant) => {
     try {
       if (!participant) return;
       const id = participant.identity || participant.sid;
@@ -262,14 +611,14 @@ joinBtn.onclick = async () => {
       }
       updateParticipantWatchControls(id);
     } catch (e) {}
-  });
-  room.on(LiveKit.RoomEvent.ParticipantAttributesChanged, (changed, participant) => {
+  }));
+  room.on(LiveKit.RoomEvent.ParticipantAttributesChanged, withActiveRoom((changed, participant) => {
     try {
       updateParticipantStreamInfo(participant);
       updateParticipantMutedFromPublications(participant);
     } catch (e) {}
-  });
-  room.on(LiveKit.RoomEvent.DataReceived, (payload, participant) => {
+  }));
+  room.on(LiveKit.RoomEvent.DataReceived, withActiveRoom((payload, participant) => {
     try {
       const text = new TextDecoder().decode(payload);
       let data = null;
@@ -280,7 +629,9 @@ joinBtn.onclick = async () => {
             const payload = JSON.stringify({ type: 'mic_mute', muted: !!micMuted });
             room.localParticipant.publishData(new TextEncoder().encode(payload), { reliable: true });
           }
-        } catch (e) {}
+        } catch (e) {
+          console.warn('[mic] failed to respond to mute request', e);
+        }
         return;
       }
       if (data && data.type === 'mic_mute') {
@@ -297,9 +648,9 @@ joinBtn.onclick = async () => {
       }
       if (text) appendChatMessage(participant?.identity || 'Unknown', text, false);
     } catch (e) {}
-  });
+  }));
 
-  room.on(LiveKit.RoomEvent.LocalTrackPublished, publication => {
+  room.on(LiveKit.RoomEvent.LocalTrackPublished, withActiveRoom((publication) => {
     try {
       if (!publication) return;
       if (publication.track && screenVideoTrack && publication.track === screenVideoTrack) {
@@ -312,40 +663,44 @@ joinBtn.onclick = async () => {
         }
       }
     } catch (e) {}
-  });
+  }));
 
   // Participant join/leave
-  room.on(LiveKit.RoomEvent.ParticipantConnected, p => {
+  room.on(LiveKit.RoomEvent.ParticipantConnected, withActiveRoom((p) => {
     try { wireParticipantMuteListeners(p); } catch (e) {}
     addParticipant(p);
     playUiTone(660, 120);
     try { renderConnectionStatus(); } catch(e){}
     refreshRoomPreview();
-  });
-  room.on(LiveKit.RoomEvent.ParticipantDisconnected, p => {
+    startMicSubscriptionSweep('participant-connected');
+  }));
+  room.on(LiveKit.RoomEvent.ParticipantDisconnected, withActiveRoom((p) => {
     removeParticipant(p);
     playUiTone(440, 160);
     try { renderConnectionStatus(); } catch(e){}
     refreshRoomPreview();
-  });
-  room.on(LiveKit.RoomEvent.ConnectionQualityChanged, (quality, participant) => {
+  }));
+  room.on(LiveKit.RoomEvent.ConnectionQualityChanged, withActiveRoom((quality, participant) => {
     try {
       const id = participant?.identity || participant?.sid || room?.localParticipant?.identity;
       if (!id) return;
-      const map = {
-        excellent: 'excellent',
-        good: 'good',
-        poor: 'poor',
-        unknown: 'unknown'
-      };
-      participantQuality.set(id, map[quality] || 'unknown');
-      updateConnectionQualityIndicator(id, map[quality] || 'unknown');
+      const mappedQuality = roomLogic.mapConnectionQuality
+      ? roomLogic.mapConnectionQuality(quality)
+      : ({
+          excellent: 'excellent',
+          good: 'good',
+          poor: 'poor',
+          unknown: 'unknown'
+        }[quality] || 'unknown');
+    participantQuality.set(id, mappedQuality);
+    updateConnectionQualityIndicator(id, mappedQuality);
     } catch (e) {}
-  });
+  }));
 
   // add existing participants (if any)
   function scanExistingParticipants() {
     try {
+      if (room !== activeRoom) return;
       debug('Scanning existing participants. room object keys:', Object.keys(room || {}));
 
       // Prefer the SDK-provided remoteParticipants collection when available
@@ -564,10 +919,154 @@ joinBtn.onclick = async () => {
   setTimeout(scanExistingParticipants, 300);
   // also run another scan a bit later to be robust
   setTimeout(scanExistingParticipants, 1200);
+  startMicSubscriptionSweep('post-join');
 
   updateUIOnConnect();
   try { renderConnectionStatus(); } catch(e){}
 };
+
+async function warmUpScreenCapture(track, timeoutMs = SCREEN_WARMUP_TIMEOUT_MS) {
+  if (!track || track.readyState === 'ended') return;
+  if (typeof window !== 'undefined' && window.__TEST_HOOKS__) return;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return;
+  await new Promise(resolve => {
+    let done = false;
+    let video = null;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      try { clearTimeout(timer); } catch (e) {}
+      if (video) {
+        try { video.onloadeddata = null; } catch (e) {}
+        try { video.oncanplay = null; } catch (e) {}
+        try { video.pause(); } catch (e) {}
+        try { video.srcObject = null; } catch (e) {}
+      }
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    try {
+      if (typeof document === 'undefined' || typeof MediaStream === 'undefined') return;
+      video = document.createElement('video');
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = new MediaStream([track]);
+      if (typeof video.requestVideoFrameCallback === 'function') {
+        video.requestVideoFrameCallback(() => finish());
+      } else {
+        video.onloadeddata = () => finish();
+        video.oncanplay = () => finish();
+      }
+      const playPromise = video.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {});
+      }
+    } catch (e) {}
+  });
+}
+
+async function captureScreenStreamWithFallback(sourceId, w, h, fps) {
+  const resolvedFps = Number.isFinite(fps) && fps > 0 ? fps : 1;
+  const minFrameRate = Math.min(resolvedFps, 30);
+  const constraintBundle = roomLogic.buildCaptureConstraints
+    ? roomLogic.buildCaptureConstraints({
+        sourceId,
+        width: w,
+        height: h,
+        fps
+      })
+    : (() => {
+        const baseVideo = {
+          chromeMediaSource: "desktop",
+          chromeMediaSourceId: sourceId,
+          minWidth: w,
+          maxWidth: w,
+          minHeight: h,
+          maxHeight: h,
+          minFrameRate,
+          maxFrameRate: resolvedFps
+        };
+        const baseAudio = {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: sourceId
+          }
+        };
+        return {
+          videoMandatory: baseVideo,
+          captureConstraints: {
+            audio: { ...baseAudio },
+            video: { mandatory: { ...baseVideo } }
+          }
+        };
+      })();
+  const baseVideo = constraintBundle.videoMandatory || {
+    chromeMediaSource: "desktop",
+    chromeMediaSourceId: sourceId,
+    minWidth: w,
+    maxWidth: w,
+    minHeight: h,
+    maxHeight: h,
+    minFrameRate,
+    maxFrameRate: resolvedFps
+  };
+  const baseAudio = constraintBundle.captureConstraints?.audio || {
+    mandatory: {
+      chromeMediaSource: 'desktop',
+      chromeMediaSourceId: sourceId
+    }
+  };
+  const noFrameCaps = roomLogic.stripFrameRateConstraints
+    ? roomLogic.stripFrameRateConstraints(baseVideo)
+    : (() => {
+        const next = { ...baseVideo };
+        delete next.minFrameRate;
+        delete next.maxFrameRate;
+        return next;
+      })();
+  const attempts = [
+    {
+      label: 'full constraints',
+      constraints: { audio: { ...baseAudio }, video: { mandatory: { ...baseVideo } } }
+    },
+    {
+      label: 'no frame caps',
+      constraints: { audio: { ...baseAudio }, video: { mandatory: { ...noFrameCaps } } }
+    },
+    {
+      label: 'relaxed size',
+      constraints: {
+        audio: { ...baseAudio },
+        video: { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: sourceId } }
+      }
+    },
+    {
+      label: 'video only',
+      constraints: {
+        audio: false,
+        video: { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: sourceId } }
+      }
+    }
+  ];
+  let lastError = null;
+  for (const attempt of attempts) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(attempt.constraints);
+    } catch (e) {
+      lastError = e;
+      const name = e?.name || 'UnknownError';
+      console.warn(`[stream] capture failed (${attempt.label})`, e);
+      if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError') {
+        const hasAudio = attempt?.constraints?.audio !== false;
+        const hasVideoOnlyFallback = attempts.some(a => a?.constraints?.audio === false);
+        if (!hasAudio || !hasVideoOnlyFallback) {
+          throw e;
+        }
+      }
+    }
+  }
+  throw lastError || new Error('Screen capture failed');
+}
 
 /* ---------- START STREAM ---------- */
 startBtn.onclick = async () => {
@@ -575,7 +1074,17 @@ startBtn.onclick = async () => {
     await stopStreaming();
     return;
   }
-  const [w, h] = resolutionSelect.value.split("x").map(Number);
+  clearScreenHealthTimer();
+  clearScreenHealthWarning();
+  clearSystemAudioWarning();
+  const resolution = roomLogic.parseResolution
+    ? roomLogic.parseResolution(resolutionSelect.value)
+    : (() => {
+        const parts = String(resolutionSelect.value || '').split('x');
+        return { width: Number(parts[0]), height: Number(parts[1]) };
+      })();
+  const w = resolution.width;
+  const h = resolution.height;
   const fps = getSelectedFps();
   const bitrate = Number(bitrateInput.value) * 1000;
   desiredScreenMaxBitrate = bitrate;
@@ -590,63 +1099,54 @@ startBtn.onclick = async () => {
     alert("No capture sources available");
     return;
   }
-
-  // Capture screen video + system audio
-  const videoMandatory = {
-    chromeMediaSource: "desktop",
-    chromeMediaSourceId: source.id,
-    minWidth: w,
-    maxWidth: w,
-    minHeight: h,
-    maxHeight: h,
-    minFrameRate: 1,
-    maxFrameRate: fps,
-  };
-  const captureConstraints = {
-    audio: {
-      mandatory: {
-        chromeMediaSource: 'desktop',
-        chromeMediaSourceId: source.id
-      }
-    },
-    video: { mandatory: videoMandatory },
-  };
-  try {
-    screenStream = await navigator.mediaDevices.getUserMedia(captureConstraints);
-  } catch (e) {
-    if (e && e.name === 'OverconstrainedError') {
-      console.warn('Capture constraints too strict, retrying without frame rate caps', e);
-      delete videoMandatory.minFrameRate;
-      delete videoMandatory.maxFrameRate;
-      screenStream = await navigator.mediaDevices.getUserMedia(captureConstraints);
-    } else {
-      throw e;
-    }
+  if (sourceSelect && source.id && source.id !== selectedId) {
+    sourceSelect.value = source.id;
+    saveSettings();
   }
 
+  // Capture screen video + system audio
+  try {
+    screenStream = await captureScreenStreamWithFallback(source.id, w, h, fps);
+  } catch (e) {
+    console.error('[stream] screen capture failed', e);
+    return;
+  }
   // Log actual capture settings (desktop capture may ignore constraints)
   try {
     const captureSettings = screenStream.getVideoTracks()[0]?.getSettings?.();
     debug('Screen capture settings:', captureSettings);
-    const actualW = captureSettings?.width || w;
-    const actualH = captureSettings?.height || h;
-    const actualFps = captureSettings?.frameRate || fps;
-    currentStreamSettings = {
-      res: `${actualW}x${actualH}`,
-      fps: String(Math.round(actualFps)),
-      maxKbps: String(Math.round(bitrate / 1000))
-    };
+    currentStreamSettings = roomLogic.buildStreamSettings
+      ? roomLogic.buildStreamSettings({
+          captureSettings,
+          fallbackWidth: w,
+          fallbackHeight: h,
+          fallbackFps: fps,
+          bitrateBps: bitrate
+        })
+      : {
+          res: `${captureSettings?.width || w}x${captureSettings?.height || h}`,
+          fps: String(Math.round(captureSettings?.frameRate || fps)),
+          maxKbps: String(Math.round(bitrate / 1000))
+        };
     setLocalStreamAttributes({
       stream_resolution: currentStreamSettings.res,
       stream_fps: currentStreamSettings.fps,
       stream_max_bitrate_kbps: currentStreamSettings.maxKbps
     });
   } catch (e) {
-    currentStreamSettings = {
-      res: `${w}x${h}`,
-      fps: String(Math.round(fps)),
-      maxKbps: String(Math.round(bitrate / 1000))
-    };
+    currentStreamSettings = roomLogic.buildStreamSettings
+      ? roomLogic.buildStreamSettings({
+          captureSettings: null,
+          fallbackWidth: w,
+          fallbackHeight: h,
+          fallbackFps: fps,
+          bitrateBps: bitrate
+        })
+      : {
+          res: `${w}x${h}`,
+          fps: String(Math.round(fps)),
+          maxKbps: String(Math.round(bitrate / 1000))
+        };
     setLocalStreamAttributes({
       stream_resolution: currentStreamSettings.res,
       stream_fps: currentStreamSettings.fps,
@@ -655,36 +1155,55 @@ startBtn.onclick = async () => {
   }
 
   // Screen video track
-  screenVideoTrack = new LiveKit.LocalVideoTrack(screenStream.getVideoTracks()[0], { name: "screen" });
+  const screenVideoMediaTrack = screenStream.getVideoTracks()[0];
+  if (!screenVideoMediaTrack) {
+    console.warn('[stream] no video tracks available from capture stream');
+    screenStream.getTracks().forEach(t => t.stop());
+    screenStream = null;
+    setStreamStatus('');
+    currentStreamSettings = { res: '', fps: '', maxKbps: '' };
+    setLocalStreamAttributes({
+      stream_resolution: '',
+      stream_fps: '',
+      stream_max_bitrate_kbps: ''
+    });
+    return;
+  }
+  await warmUpScreenCapture(screenVideoMediaTrack);
+  screenVideoTrack = new LiveKit.LocalVideoTrack(screenVideoMediaTrack, { name: "screen" });
+  registerLocalTrack('screenVideo', screenVideoTrack);
   try { screenVideoTrack.mediaStreamTrack.contentHint = 'motion'; } catch (e) {}
-  try {
-    const track = screenVideoTrack.mediaStreamTrack;
-    if (track) {
-      track.onended = () => {
-        console.warn('[stream] screen video track ended', {
-          readyState: track.readyState,
-          label: track.label
-        });
-      };
-      track.onmute = () => {
-        logInfo('[stream] screen video track muted', { readyState: track.readyState });
-      };
-      track.onunmute = () => {
-        logInfo('[stream] screen video track unmuted', { readyState: track.readyState });
-      };
-    }
-  } catch (e) {}
+  wireScreenTrackEvents(screenVideoTrack);
   const simulcastLayers = getScreenSimulcastLayers(
     screenStream.getVideoTracks()[0]?.getSettings?.()?.height
   );
   logInfo('[stream] publishing screen video track', { trackSid: screenVideoTrack?.sid });
-  const screenPub = await room.localParticipant.publishTrack(screenVideoTrack, {
-    simulcast: simulcastLayers.length > 0,
-    source: LiveKit.Track.Source.ScreenShare,
-    videoEncoding: { maxBitrate: bitrate, maxFramerate: fps },
-    videoSimulcastLayers: simulcastLayers.length > 0 ? simulcastLayers : undefined,
-    videoCodec: 'vp8'
-  });
+  let screenPub = null;
+  try {
+    screenPub = await room.localParticipant.publishTrack(screenVideoTrack, {
+      simulcast: simulcastLayers.length > 0,
+      source: LiveKit.Track.Source.ScreenShare,
+      videoEncoding: { maxBitrate: bitrate, maxFramerate: fps },
+      videoSimulcastLayers: simulcastLayers.length > 0 ? simulcastLayers : undefined,
+      videoCodec: 'vp8'
+    });
+  } catch (e) {
+    console.error('[stream] publish screen video failed', e);
+    try { screenVideoTrack.stop(); } catch (err) {}
+    try { detachTrack(screenVideoTrack); } catch (err) {}
+    unregisterLocalTrack('screenVideo', screenVideoTrack);
+    screenVideoTrack = null;
+    screenStream?.getTracks().forEach(t => t.stop());
+    screenStream = null;
+    setStreamStatus('');
+    currentStreamSettings = { res: '', fps: '', maxKbps: '' };
+    setLocalStreamAttributes({
+      stream_resolution: '',
+      stream_fps: '',
+      stream_max_bitrate_kbps: ''
+    });
+    return;
+  }
   logInfo('[stream] published screen video track', {
     pubSid: screenPub?.trackSid,
     trackSid: screenVideoTrack?.sid,
@@ -697,16 +1216,29 @@ startBtn.onclick = async () => {
   // System audio track
   if (screenStream.getAudioTracks().length > 0) {
     screenAudioTrack = new LiveKit.LocalAudioTrack(screenStream.getAudioTracks()[0], { name: "systemAudio" });
+    registerLocalTrack('screenAudio', screenAudioTrack);
+    wireScreenAudioEvents(screenAudioTrack);
     const screenAudioOpts = {};
     try {
       if (LiveKit?.Track?.Source?.ScreenShareAudio != null) {
         screenAudioOpts.source = LiveKit.Track.Source.ScreenShareAudio;
       }
     } catch (e) {}
-    await room.localParticipant.publishTrack(screenAudioTrack, screenAudioOpts);
-    // Enable system audio mute button after track is ready
-    muteSystemBtn.disabled = false;
-    muteSystemBtn.style.display = '';
+    try {
+      await room.localParticipant.publishTrack(screenAudioTrack, screenAudioOpts);
+      clearSystemAudioWarning();
+      // Enable system audio mute button after track is ready
+      muteSystemBtn.disabled = false;
+      muteSystemBtn.style.display = '';
+    } catch (e) {
+      console.warn('[stream] publish screen audio failed', e);
+      try { screenAudioTrack.stop(); } catch (err) {}
+      unregisterLocalTrack('screenAudio', screenAudioTrack);
+      screenAudioTrack = null;
+      setSystemAudioWarning(true);
+    }
+  } else {
+    setSystemAudioWarning(true);
   }
 
   attachTrack(screenVideoTrack, true);
@@ -716,24 +1248,57 @@ startBtn.onclick = async () => {
 
 /* ---------- STOP STREAM ---------- */
 async function stopStreaming() {
-  if (!isStreaming) return;
-  if (screenVideoTrack) {
-    logInfo('[stream] unpublishing screen video track', { trackSid: screenVideoTrack?.sid });
-    await room.localParticipant.unpublishTrack(screenVideoTrack);
-    screenVideoTrack.stop();
-    detachTrack(screenVideoTrack);
-    screenVideoTrack = null;
+  if (!isStreaming && !screenVideoTrack && !screenAudioTrack) return;
+  const videoTrack = screenVideoTrack;
+  const audioTrack = screenAudioTrack;
+  screenVideoTrack = null;
+  screenAudioTrack = null;
+  if (videoTrack) {
+    logInfo('[stream] unpublishing screen video track', { trackSid: videoTrack?.sid });
+    try {
+      if (room?.localParticipant?.unpublishTrack) {
+        await room.localParticipant.unpublishTrack(videoTrack);
+      }
+    } catch (e) {
+      console.warn('[stream] unpublish screen video failed (continuing)', e);
+    }
+    try {
+      if (videoTrack.mediaStreamTrack) {
+        videoTrack.mediaStreamTrack.onended = null;
+        videoTrack.mediaStreamTrack.onmute = null;
+        videoTrack.mediaStreamTrack.onunmute = null;
+      }
+    } catch (e) {}
+    try { videoTrack.stop(); } catch (e) {}
+    try { detachTrack(videoTrack); } catch (e) {}
+    unregisterLocalTrack('screenVideo', videoTrack);
   }
 
-  if (screenAudioTrack) {
-    await room.localParticipant.unpublishTrack(screenAudioTrack);
-    screenAudioTrack.stop();
-    detachTrack(screenAudioTrack);
-    screenAudioTrack = null;
+  if (audioTrack) {
+    try {
+      if (room?.localParticipant?.unpublishTrack) {
+        await room.localParticipant.unpublishTrack(audioTrack);
+      }
+    } catch (e) {
+      console.warn('[stream] unpublish screen audio failed (continuing)', e);
+    }
+    try {
+      if (audioTrack.mediaStreamTrack) {
+        audioTrack.mediaStreamTrack.onended = null;
+        audioTrack.mediaStreamTrack.onmute = null;
+        audioTrack.mediaStreamTrack.onunmute = null;
+      }
+    } catch (e) {}
+    try { audioTrack.stop(); } catch (e) {}
+    try { detachTrack(audioTrack); } catch (e) {}
+    unregisterLocalTrack('screenAudio', audioTrack);
   }
 
   screenStream?.getTracks().forEach(t => t.stop());
   screenStream = null;
+  clearScreenHealthTimer();
+  clearScreenHealthWarning();
+  clearSystemAudioWarning();
 
   setStreamStatus('');
   currentStreamSettings = { res: '', fps: '', maxKbps: '' };
@@ -743,6 +1308,7 @@ async function stopStreaming() {
     stream_max_bitrate_kbps: ''
   });
   screenSenderConfigured = false;
+  screenSenderConfigInFlight = false;
   stopSenderStatsLogging();
   setStreamButtonState(false);
   muteSystemBtn.disabled = true;
@@ -760,8 +1326,14 @@ async function leaveRoom() {
   if (joinBtn) joinBtn.disabled = true;
   manualDisconnect = true;
   if (autoRejoinTimer) { clearTimeout(autoRejoinTimer); autoRejoinTimer = null; }
+  resetReconnectAttempts();
   setReconnectBanner(false);
+  stopMicSubscriptionSweep();
   setStreamButtonState(false);
+  clearScreenHealthTimer();
+  clearScreenHealthWarning();
+  clearSystemAudioWarning();
+  if (typeof clearMicRecoveryState === 'function') clearMicRecoveryState();
   setJoinButtonState(false);
   stopPingMonitor();
   stopAudioLevelMonitor();
@@ -778,21 +1350,25 @@ async function leaveRoom() {
       console.warn('[stream] unpublish screen video failed (continuing)', e);
     }
     try { screenVideoTrack.stop(); } catch (e) {}
+    unregisterLocalTrack('screenVideo', screenVideoTrack);
   }
   if (screenAudioTrack) {
     try { await room.localParticipant.unpublishTrack(screenAudioTrack); } catch (e) {
       console.warn('[stream] unpublish screen audio failed (continuing)', e);
     }
     try { screenAudioTrack.stop(); } catch (e) {}
+    unregisterLocalTrack('screenAudio', screenAudioTrack);
   }
   if (micAudioTrack) {
     try { await room.localParticipant.unpublishTrack(micAudioTrack); } catch (e) {
       console.warn('[mic] unpublish failed (continuing)', e);
     }
     try { micAudioTrack.stop(); } catch (e) {}
+    unregisterLocalTrack('mic', micAudioTrack);
   }
 
   stopMicGate();
+  closeAudioContext();
   micStream?.getTracks().forEach(t => t.stop());
   screenStream?.getTracks().forEach(t => t.stop());
   micStream = null;
@@ -800,6 +1376,7 @@ async function leaveRoom() {
   micAudioTrack = null;
   screenVideoTrack = null;
   screenAudioTrack = null;
+  clearLocalTrackRegistry();
 
   setLocalStreamAttributes({
     stream_resolution: '',
@@ -812,6 +1389,7 @@ async function leaveRoom() {
   currentStreamSettings = { res: '', fps: '', maxKbps: '' };
 
   screenSenderConfigured = false;
+  screenSenderConfigInFlight = false;
   stopSenderStatsLogging();
   // cleanup streams and participant UI + audio resources
   streamsDiv.innerHTML = "";
@@ -872,4 +1450,19 @@ async function leaveRoom() {
   if (muteIncomingBtn) muteIncomingBtn.disabled = false;
   if (roomAccessSection) roomAccessSection.classList.remove('collapsed');
 }
+
+if (window.__TEST_HOOKS__) {
+  window.__TEST_HOOKS__.room = {
+    startStreaming: () => startBtn.onclick(),
+    stopStreaming,
+    captureScreenStreamWithFallback,
+    handleScreenShareReconnect,
+    getScreenVideoTrack: () => screenVideoTrack,
+    getScreenAudioTrack: () => screenAudioTrack,
+    getScreenStream: () => screenStream,
+    getCurrentStreamSettings: () => currentStreamSettings,
+    isStreaming: () => isStreaming
+  };
+}
+
 

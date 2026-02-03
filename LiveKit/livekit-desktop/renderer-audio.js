@@ -7,20 +7,39 @@ muteMicBtn.onclick = () => {
 
 /* ---------- MIC PROCESSING ---------- */
 if (echoCancelBtn) echoCancelBtn.onclick = async () => {
-  micProcessing.echoCancellation = !micProcessing.echoCancellation;
+  const prev = micProcessing.echoCancellation;
+  micProcessing.echoCancellation = !prev;
   updateMicProcessingButtons();
-  await restartMicTrack();
+  const ok = await restartMicTrack();
+  if (!ok) {
+    micProcessing.echoCancellation = prev;
+    updateMicProcessingButtons();
+    console.warn('[mic] echo cancellation update failed; reverted');
+  }
 };
 if (noiseSuppressBtn) noiseSuppressBtn.onclick = async () => {
-  micProcessing.noiseSuppression = !micProcessing.noiseSuppression;
+  const prev = micProcessing.noiseSuppression;
+  micProcessing.noiseSuppression = !prev;
   updateMicProcessingButtons();
-  await restartMicTrack();
+  const ok = await restartMicTrack();
+  if (!ok) {
+    micProcessing.noiseSuppression = prev;
+    updateMicProcessingButtons();
+    console.warn('[mic] noise suppression update failed; reverted');
+  }
 };
 if (noiseGateBtn) noiseGateBtn.onclick = async () => {
-  micProcessing.noiseGateEnabled = !micProcessing.noiseGateEnabled;
+  const prev = micProcessing.noiseGateEnabled;
+  micProcessing.noiseGateEnabled = !prev;
   updateMicProcessingButtons();
   saveSettings();
-  await restartMicTrack();
+  const ok = await restartMicTrack();
+  if (!ok) {
+    micProcessing.noiseGateEnabled = prev;
+    updateMicProcessingButtons();
+    saveSettings();
+    console.warn('[mic] noise gate update failed; reverted');
+  }
 };
 if (noiseGateSlider) noiseGateSlider.oninput = () => {
   micProcessing.noiseGateLevel = Math.max(0, Math.min(100, Number(noiseGateSlider.value) || 0));
@@ -33,15 +52,28 @@ if (enhancedVoiceSlider) enhancedVoiceSlider.oninput = () => {
   saveSettings();
 };
 if (enhancedVoiceBtn) enhancedVoiceBtn.onclick = async () => {
-  micProcessing.enhancedVoiceEnabled = !micProcessing.enhancedVoiceEnabled;
+  const prev = micProcessing.enhancedVoiceEnabled;
+  micProcessing.enhancedVoiceEnabled = !prev;
   updateMicProcessingButtons();
   saveSettings();
-  await restartMicTrack();
+  const ok = await restartMicTrack();
+  if (!ok) {
+    micProcessing.enhancedVoiceEnabled = prev;
+    updateMicProcessingButtons();
+    saveSettings();
+    console.warn('[mic] enhanced voice update failed; reverted');
+  }
 };
 if (autoGainBtn) autoGainBtn.onclick = async () => {
-  micProcessing.autoGainControl = !micProcessing.autoGainControl;
+  const prev = micProcessing.autoGainControl;
+  micProcessing.autoGainControl = !prev;
   updateMicProcessingButtons();
-  await restartMicTrack();
+  const ok = await restartMicTrack();
+  if (!ok) {
+    micProcessing.autoGainControl = prev;
+    updateMicProcessingButtons();
+    console.warn('[mic] auto gain update failed; reverted');
+  }
 };
 
 // if (manualGainSlider) manualGainSlider.oninput = async () => {

@@ -1,6 +1,126 @@
-﻿const LiveKit = window.LivekitClient;
+﻿function createE2eLiveKitStub() {
+  let sidCounter = 0;
+  function LocalTrack(mediaStreamTrack, opts = {}) {
+    if (!(this instanceof LocalTrack)) return new LocalTrack(mediaStreamTrack, opts);
+    this.mediaStreamTrack = mediaStreamTrack;
+    this.name = opts.name || '';
+    this.sid = `track-${++sidCounter}`;
+    this.kind = mediaStreamTrack?.kind || opts.kind || 'unknown';
+  }
+  LocalTrack.prototype.stop = function () {
+    try { this.mediaStreamTrack?.stop?.(); } catch (e) {}
+  };
+  LocalTrack.prototype.replaceTrack = async function (nextTrack) {
+    this.mediaStreamTrack = nextTrack;
+  };
+  function LocalAudioTrack(mediaStreamTrack, opts = {}) {
+    LocalTrack.call(this, mediaStreamTrack, opts);
+    this.kind = 'audio';
+  }
+  LocalAudioTrack.prototype = Object.create(LocalTrack.prototype);
+  LocalAudioTrack.prototype.constructor = LocalAudioTrack;
+  function LocalVideoTrack(mediaStreamTrack, opts = {}) {
+    LocalTrack.call(this, mediaStreamTrack, opts);
+    this.kind = 'video';
+  }
+  LocalVideoTrack.prototype = Object.create(LocalTrack.prototype);
+  LocalVideoTrack.prototype.constructor = LocalVideoTrack;
+  function LocalParticipant() {
+    this.identity = 'e2e-user';
+    this.sid = 'e2e-local';
+    this.audioTrackPublications = new Map();
+    this.videoTrackPublications = new Map();
+    this.attributes = {};
+  }
+  LocalParticipant.prototype.publishTrack = async function (track, opts = {}) {
+    const pub = {
+      track,
+      trackSid: `pub-${track.sid}`,
+      source: opts.source,
+      kind: track.kind,
+      name: track.name,
+      trackInfo: { layers: [] },
+      sender: {
+        getParameters: () => ({ encodings: [{}] }),
+        setParameters: () => Promise.resolve(),
+        getStats: () => Promise.resolve([])
+      }
+    };
+    if (track.kind === 'audio') this.audioTrackPublications.set(pub.trackSid, pub);
+    if (track.kind === 'video') this.videoTrackPublications.set(pub.trackSid, pub);
+    return pub;
+  };
+  LocalParticipant.prototype.unpublishTrack = async function (track) {
+    for (const [sid, pub] of this.audioTrackPublications) {
+      if (pub.track === track) this.audioTrackPublications.delete(sid);
+    }
+    for (const [sid, pub] of this.videoTrackPublications) {
+      if (pub.track === track) this.videoTrackPublications.delete(sid);
+    }
+  };
+  LocalParticipant.prototype.setAttributes = function (attrs) {
+    this.attributes = { ...attrs };
+    return Promise.resolve();
+  };
+  LocalParticipant.prototype.publishData = function () {};
+  function Room() {
+    if (!(this instanceof Room)) return new Room();
+    this.state = 'disconnected';
+    this.localParticipant = new LocalParticipant();
+    this.remoteParticipants = new Map();
+    this._listeners = new Map();
+  }
+  Room.prototype.on = function (event, handler) {
+    if (!this._listeners.has(event)) this._listeners.set(event, []);
+    this._listeners.get(event).push(handler);
+  };
+  Room.prototype.removeAllListeners = function () {
+    this._listeners.clear();
+  };
+  Room.prototype.connect = async function () {
+    this.state = 'connected';
+  };
+  Room.prototype.disconnect = async function () {
+    this.state = 'disconnected';
+    const handlers = this._listeners.get('Disconnected') || [];
+    handlers.forEach(handler => {
+      try { handler(); } catch (e) {}
+    });
+  };
+  const Track = {
+    Source: {
+      ScreenShare: 'screenshare',
+      ScreenShareAudio: 'screenshareaudio',
+      Microphone: 'microphone'
+    }
+  };
+  const RoomEvent = {
+    Reconnecting: 'Reconnecting',
+    Reconnected: 'Reconnected',
+    Disconnected: 'Disconnected',
+    TrackSubscribed: 'TrackSubscribed',
+    TrackUnsubscribed: 'TrackUnsubscribed',
+    TrackMuted: 'TrackMuted',
+    TrackUnmuted: 'TrackUnmuted',
+    TrackPublished: 'TrackPublished',
+    TrackUnpublished: 'TrackUnpublished',
+    ParticipantConnected: 'ParticipantConnected',
+    ParticipantDisconnected: 'ParticipantDisconnected',
+    ConnectionQualityChanged: 'ConnectionQualityChanged',
+    DataReceived: 'DataReceived',
+    LocalTrackPublished: 'LocalTrackPublished',
+    ParticipantAttributesChanged: 'ParticipantAttributesChanged'
+  };
+  return { Room, LocalAudioTrack, LocalVideoTrack, Track, RoomEvent };
+}
 
-const LIVEKIT_URL = "";
+if (window.__E2E_LIVE__ && !window.__TEST_HOOKS__) {
+  window.__TEST_HOOKS__ = {};
+}
+const LiveKit = window.__E2E_MODE__ ? createE2eLiveKitStub() : window.LivekitClient;
+const coreLogic = window.TheCordLogic || {};
+
+let LIVEKIT_URL = "";
 const DEBUG = false;
 const debug = (...args) => { if (DEBUG) console.log(...args); };
 const logInfo = (...args) => { if (DEBUG) console.info(...args); };
@@ -11,11 +131,18 @@ const CHAT_PORT = 7883;
 let room;
 let micStream, micAudioTrack;
 let screenStream, screenVideoTrack, screenAudioTrack;
+let micRecoveryTimer = null;
+let micRecoveryAttempts = 0;
+let micRecoveryInFlight = false;
+let micRestartSeq = 0;
+const micRecoveryMaxAttempts = 3;
+const micRecoveryBaseDelayMs = 1000;
 let senderStatsTimer = null;
 let screenSenderConfigured = false;
+let screenSenderConfigInFlight = false;
 let desiredScreenMaxBitrate = 0;
 let desiredScreenMaxFramerate = 0;
-let currentStreamSendMbps = null;
+let currentStreamSendKbps = null;
 let lastJoinToken = '';
 let manualDisconnect = false;
 let autoRejoinTimer = null;
@@ -60,6 +187,8 @@ let capturingHotkey = false;
 let autoCollapsedForWidth = false;
 let desiredLeftWidth = 320;
 let muteBroadcastTimer = null;
+let reconnectAttempts = 0;
+const maxReconnectAttempts = 3;
 const participantAudioEls = new Map();
 const participantAudioControls = new Map();
 const participantListAudioControls = new Map();
@@ -74,6 +203,7 @@ const participantAudioTracks = new Map();
 const participantsById = new Map();
 const watchedVideoParticipants = new Set();
 const pendingStreamAudioPlay = new Set();
+const localTrackRegistry = new Map();
 
 function kickStreamAudioPlayback(participantId) {
   try {
@@ -264,6 +394,17 @@ function setPingDisplay(ms) {
 }
 
 function getRoomFromToken(token) {
+  if (coreLogic.getRoomFromToken) {
+    try {
+      return coreLogic.getRoomFromToken(token);
+    } catch (e) {
+      logInfo('[token] failed to parse room', {
+        error: e?.message,
+        hasToken: !!token,
+        tokenLength: token?.length || 0
+      });
+    }
+  }
   try {
     if (!token) return null;
     const parts = token.split('.');
@@ -285,6 +426,17 @@ function getRoomFromToken(token) {
 }
 
 function getNameFromToken(token) {
+  if (coreLogic.getNameFromToken) {
+    try {
+      return coreLogic.getNameFromToken(token);
+    } catch (e) {
+      logInfo('[token] failed to parse name', {
+        error: e?.message,
+        hasToken: !!token,
+        tokenLength: token?.length || 0
+      });
+    }
+  }
   try {
     if (!token) return null;
     const parts = token.split('.');
@@ -308,6 +460,13 @@ function getNameFromToken(token) {
 function resolveLivekitHostInfo() {
   const raw = serverUrlInput?.value?.trim() || LIVEKIT_URL || '';
   if (!raw) return null;
+  if (coreLogic.resolveHostInfo) {
+    try {
+      return coreLogic.resolveHostInfo(raw);
+    } catch (e) {
+      logInfo('[services] failed to parse server url', { error: e?.message });
+    }
+  }
   const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw);
   const candidate = hasScheme ? raw : `https://${raw}`;
   try {
@@ -321,6 +480,13 @@ function resolveLivekitHostInfo() {
 }
 
 function normalizeChatUrl(raw) {
+  if (coreLogic.normalizeChatUrl) {
+    try {
+      return coreLogic.normalizeChatUrl(raw, CHAT_PORT);
+    } catch (e) {
+      logInfo('[chat] failed to parse chat server url', { error: e?.message });
+    }
+  }
   const trimmed = raw?.trim();
   if (!trimmed) return null;
   const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed);
@@ -340,6 +506,13 @@ function normalizeChatUrl(raw) {
 }
 
 function normalizePresenceUrl(raw) {
+  if (coreLogic.normalizePresenceUrl) {
+    try {
+      return coreLogic.normalizePresenceUrl(raw, PRESENCE_PORT);
+    } catch (e) {
+      logInfo('[presence] failed to parse presence server url', { error: e?.message });
+    }
+  }
   const trimmed = raw?.trim();
   if (!trimmed) return null;
   const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed);
@@ -818,13 +991,48 @@ function findPublicationForTrackSid(sid) {
 
 function scheduleAutoRejoin() {
   if (autoRejoinTimer || !lastJoinToken) return;
+  if (reconnectAttempts >= maxReconnectAttempts) {
+    setReconnectBanner(false);
+    setErrorBanner('Connection lost. Click Join to retry.');
+    return;
+  }
+  reconnectAttempts += 1;
+  const delayMs = 2000 * reconnectAttempts;
   autoRejoinTimer = setTimeout(() => {
     autoRejoinTimer = null;
     if (!manualDisconnect && lastJoinToken) {
       jwtInput.value = lastJoinToken;
       joinBtn.click();
     }
-  }, 2000);
+  }, delayMs);
+}
+
+function registerLocalTrack(kind, track) {
+  if (!kind || !track) return;
+  localTrackRegistry.set(kind, track);
+}
+
+function unregisterLocalTrack(kind, track) {
+  if (!kind) return;
+  if (!track || localTrackRegistry.get(kind) === track) {
+    localTrackRegistry.delete(kind);
+  }
+}
+
+function clearLocalTrackRegistry() {
+  localTrackRegistry.clear();
+}
+
+function getSharingState() {
+  return {
+    isScreenSharing: localTrackRegistry.has('screenVideo'),
+    isAudioSharing: localTrackRegistry.has('screenAudio'),
+    localTracks: Array.from(localTrackRegistry.keys())
+  };
+}
+
+function resetReconnectAttempts() {
+  reconnectAttempts = 0;
 }
 
 function getParticipantCount() {
@@ -944,6 +1152,16 @@ function getAudioContext() {
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
   }
   return audioContext;
+}
+
+function closeAudioContext() {
+  if (!audioContext) return;
+  try {
+    audioContext.close();
+  } catch (e) {
+    console.warn('[audio] closeAudioContext failed', e);
+  }
+  audioContext = null;
 }
 
 function getParticipantMeterElement(participantId) {
@@ -1316,11 +1534,27 @@ function getMicAudioPublicationsForParticipant(p) {
         pubs.push(...p.tracks);
       }
     } catch (e) {}
-    return pubs.filter(pub => {
+    const audioPubs = pubs.filter(pub => {
+      const kind = pub?.kind || pub?.track?.kind;
+      return kind === 'audio';
+    });
+    const filtered = audioPubs.filter(pub => {
       const kind = pub?.kind || pub?.track?.kind;
       if (kind !== 'audio') return false;
       return isMicrophonePublication(pub);
     });
+    if (filtered.length) return filtered;
+    const id = p.identity || p.sid;
+    const isStreaming = id ? Boolean(participantStreamInfo.get(id)) : false;
+    if (!isStreaming && audioPubs.length) {
+      return audioPubs.filter(pub => {
+        const rawSource = pub?.source ?? pub?.track?.source;
+        if (isScreenShareAudioStrict(pub?.track || {}, rawSource)) return false;
+        if (isLikelyStreamAudioTrack(pub?.track || {}, rawSource)) return false;
+        return true;
+      });
+    }
+    return [];
   } catch (e) {}
   return [];
 }
@@ -1435,7 +1669,7 @@ function setParticipantStreamAudioSubscribed(participantId, subscribe) {
         pub.setSubscribed(subscribe);
       }
       if (!subscribe && pub?.track) {
-        detachTrack(pub.track);
+        detachTrack(pub.track, participantId);
       } else if (subscribe && pub?.track) {
         attachTrack(pub.track);
         try { pub.track.mediaStreamTrack.enabled = true; } catch (e) {}
@@ -1560,7 +1794,7 @@ function setParticipantVideoSubscribed(participantId, subscribe, trackSidOverrid
         pub.setSubscribed(subscribe);
       }
       if (!subscribe && pub?.track) {
-        detachTrack(pub.track);
+        detachTrack(pub.track, participantId);
       } else if (subscribe && pub?.track) {
         attachTrack(pub.track);
       } else if (subscribe) {
@@ -1694,8 +1928,8 @@ function updateStreamNameLabel(id) {
       const info = participantStreamInfo.get(id) || '';
       let metrics = '';
       if (room?.localParticipant && (id === room.localParticipant.identity || id === room.localParticipant.sid)) {
-        if (currentStreamSendMbps != null) {
-          metrics = `${currentStreamSendMbps.toFixed(1)} Mbps`;
+        if (currentStreamSendKbps != null) {
+          metrics = `${Math.round(currentStreamSendKbps)} kbps`;
         }
       }
       const parts = [name];
@@ -2194,6 +2428,35 @@ function isMicrophonePublication(pub) {
   return false;
 }
 
+function getLocalMicrophonePublication(participantOverride) {
+  try {
+    const participant = participantOverride || room?.localParticipant;
+    if (!participant) return null;
+    const pubs = participant.audioTrackPublications
+      ? Array.from(participant.audioTrackPublications.values ? participant.audioTrackPublications.values() : participant.audioTrackPublications)
+      : [];
+    let pub = pubs.find(p => isMicrophonePublication(p) && !isStreamAudioPublication(p));
+    if (!pub) pub = pubs.find(p => isMicrophonePublication(p));
+    if (!pub) pub = pubs.find(p => !isStreamAudioPublication(p));
+    if (pub) return pub;
+    try {
+      if (LiveKit?.Track?.Source?.Microphone != null && participant.getTrackPublication) {
+        return participant.getTrackPublication(LiveKit.Track.Source.Microphone) || null;
+      }
+    } catch (e) {}
+  } catch (e) {}
+  return null;
+}
+
+function getLocalMicTrack() {
+  try {
+    const pub = getLocalMicrophonePublication();
+    if (pub?.track && !isStreamAudioPublication(pub)) return pub.track;
+  } catch (e) {}
+  if (micAudioTrack && !isScreenShareAudio(micAudioTrack, micAudioTrack?.source)) return micAudioTrack;
+  return null;
+}
+
 function getPublicationMuted(pub) {
   try {
     if (!pub) return false;
@@ -2570,8 +2833,9 @@ function stopRoomPreviewTimer() {
 
 function setMicMuteState(muted) {
   micMuted = muted;
-  if (micAudioTrack) {
-    micAudioTrack.mediaStreamTrack.enabled = !muted;
+  const micTrack = getLocalMicTrack();
+  if (micTrack) {
+    micTrack.mediaStreamTrack.enabled = !muted;
   }
   if (!muteMicBtn) return;
   muteMicBtn.classList.toggle('is-muted', muted);
@@ -3337,31 +3601,108 @@ function buildMicConstraints() {
 //   }
 // }
 
-async function restartMicTrack() {
-  if (!room) return;
+function clearMicRecoveryState() {
+  if (micRecoveryTimer) {
+    clearTimeout(micRecoveryTimer);
+    micRecoveryTimer = null;
+  }
+  micRecoveryAttempts = 0;
+  micRecoveryInFlight = false;
+}
+
+function scheduleMicRecovery(reason) {
   try {
-    const previousTrack = micAudioTrack;
-    const previousStream = micStream;
-    const previousGateState = micGateState;
-    const wasMuted = previousTrack ? !previousTrack.mediaStreamTrack.enabled : false;
-    let nextStream = null;
+    if (manualDisconnect) return;
+    if (!room || room.state === 'disconnected') return;
+    if (micRecoveryTimer || micRecoveryInFlight) return;
+    if (micRecoveryAttempts >= micRecoveryMaxAttempts) return;
+    micRecoveryAttempts += 1;
+    const delayMs = micRecoveryBaseDelayMs * micRecoveryAttempts;
+    logInfo('[mic] scheduling recovery', { reason, attempt: micRecoveryAttempts, delayMs });
+    micRecoveryTimer = setTimeout(async () => {
+      micRecoveryTimer = null;
+      if (manualDisconnect || !room || room.state === 'disconnected') return;
+      micRecoveryInFlight = true;
+      let ok = false;
+      try {
+        ok = await restartMicTrack();
+      } catch (e) {}
+      micRecoveryInFlight = false;
+      if (!ok) {
+        scheduleMicRecovery('retry failed');
+      }
+    }, delayMs);
+  } catch (e) {}
+}
+
+function wireMicTrackEvents(track) {
+  try {
+    const mediaTrack = track?.mediaStreamTrack;
+    if (!mediaTrack) return;
+    mediaTrack.onended = () => {
+      logInfo('[mic] track ended', {
+        readyState: mediaTrack.readyState,
+        label: mediaTrack.label
+      });
+      if (!micAudioTrack || micAudioTrack.mediaStreamTrack !== mediaTrack) return;
+      scheduleMicRecovery('track ended');
+    };
+    mediaTrack.onmute = () => {
+      logInfo('[mic] track muted', { readyState: mediaTrack.readyState });
+    };
+    mediaTrack.onunmute = () => {
+      logInfo('[mic] track unmuted', { readyState: mediaTrack.readyState });
+    };
+  } catch (e) {}
+}
+
+async function restartMicTrack() {
+  if (!room) return true;
+  const restartSeq = ++micRestartSeq;
+  const roomRef = room;
+  if (!roomRef?.localParticipant) return false;
+  const previousTrack = micAudioTrack;
+  const previousStream = micStream;
+  const previousGateState = micGateState;
+  const wasMuted = previousTrack ? !previousTrack.mediaStreamTrack.enabled : false;
+  let nextStream = null;
+  const isStale = () => restartSeq !== micRestartSeq || room !== roomRef;
+  const abortStale = () => {
+    if (nextStream) {
+      try { nextStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    }
+    if (micGateState && micGateState !== previousGateState) {
+      stopMicGateState(micGateState);
+      micGateState = previousGateState;
+    }
+    return true;
+  };
+  let success = false;
+  try {
     try {
       nextStream = await navigator.mediaDevices.getUserMedia(buildMicConstraints());
     } catch (e) {
       console.warn('[mic] getUserMedia failed, retrying default device', e);
-      nextStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: micProcessing.echoCancellation,
-          noiseSuppression: micProcessing.noiseSuppression,
-          autoGainControl: micProcessing.autoGainControl
-        }
-      });
+      try {
+        nextStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: micProcessing.echoCancellation,
+            noiseSuppression: micProcessing.noiseSuppression,
+            autoGainControl: micProcessing.autoGainControl
+          }
+        });
+      } catch (fallbackError) {
+        console.warn('[mic] getUserMedia failed on fallback device', fallbackError);
+        return false;
+      }
     }
-    if (!nextStream) return;
+    if (isStale()) return abortStale();
+    if (!nextStream) return false;
     const baseTrack = nextStream.getAudioTracks()[0];
     if (!baseTrack) {
       nextStream.getTracks().forEach(t => t.stop());
-      throw new Error('[mic] No audio tracks returned from getUserMedia');
+      console.warn('[mic] No audio tracks returned from getUserMedia');
+      return false;
     }
     const processedTrack = (micProcessing.noiseGateEnabled || micProcessing.enhancedVoiceEnabled)
       ? createProcessedMicTrack(nextStream)
@@ -3374,6 +3715,7 @@ async function restartMicTrack() {
       }
     }
     const nextMediaTrack = processedTrack || monoFallbackTrack || baseTrack;
+    if (isStale()) return abortStale();
     const micPublishOpts = {};
     try {
       if (LiveKit?.Track?.Source?.Microphone != null) {
@@ -3381,14 +3723,8 @@ async function restartMicTrack() {
       }
     } catch (e) {}
 
-    const micPub = (() => {
-      try {
-        if (LiveKit?.Track?.Source?.Microphone != null) {
-          return room?.localParticipant?.getTrackPublication(LiveKit.Track.Source.Microphone);
-        }
-      } catch (e) {}
-      return null;
-    })();
+    const micPub = getLocalMicrophonePublication(roomRef?.localParticipant);
+    if (isStale()) return abortStale();
 
     if (micPub?.track) {
       const previousMediaTrack = micPub.track.mediaStreamTrack;
@@ -3401,13 +3737,15 @@ async function restartMicTrack() {
           stopMicGateState(micGateState);
         }
         micGateState = previousGateState;
-        return;
+        return false;
       }
+      if (isStale()) return abortStale();
       micStream = nextStream;
       micAudioTrack = micPub.track;
+      registerLocalTrack('mic', micAudioTrack);
       micAudioTrack.mediaStreamTrack.enabled = wasMuted ? false : true;
       attachTrack(micAudioTrack, true);
-      const localId = room?.localParticipant?.identity || room?.localParticipant?.sid;
+      const localId = roomRef?.localParticipant?.identity || roomRef?.localParticipant?.sid;
       if (localId) connectParticipantMeter(localId, micAudioTrack);
       if (previousMediaTrack && previousMediaTrack !== micAudioTrack.mediaStreamTrack) {
         try { previousMediaTrack.stop(); } catch (e) {}
@@ -3418,12 +3756,15 @@ async function restartMicTrack() {
       if (previousGateState && previousGateState !== micGateState) {
         stopMicGateState(previousGateState);
       }
-      return;
+      wireMicTrackEvents(micAudioTrack);
+      clearMicRecoveryState();
+      success = true;
+      return true;
     }
 
     const nextTrack = new LiveKit.LocalAudioTrack(nextMediaTrack, { name: 'microphone' });
     try {
-      await room.localParticipant.publishTrack(nextTrack, micPublishOpts);
+      await roomRef?.localParticipant?.publishTrack(nextTrack, micPublishOpts);
     } catch (e) {
       console.warn('[mic] publishTrack failed', e);
       try { nextTrack.stop(); } catch (err) {}
@@ -3432,11 +3773,12 @@ async function restartMicTrack() {
         stopMicGateState(micGateState);
       }
       micGateState = previousGateState;
-      return;
+      return false;
     }
+    if (isStale()) return abortStale();
     if (previousTrack) {
       try {
-        await room.localParticipant.unpublishTrack(previousTrack);
+        await roomRef?.localParticipant?.unpublishTrack(previousTrack);
       } catch (e) {
         console.warn('[mic] unpublishTrack failed (continuing)', e);
       }
@@ -3451,13 +3793,37 @@ async function restartMicTrack() {
     }
     micStream = nextStream;
     micAudioTrack = nextTrack;
+    registerLocalTrack('mic', micAudioTrack);
     micAudioTrack.mediaStreamTrack.enabled = wasMuted ? false : true;
     attachTrack(micAudioTrack, true);
-    const localId = room?.localParticipant?.identity || room?.localParticipant?.sid;
+    const localId = roomRef?.localParticipant?.identity || roomRef?.localParticipant?.sid;
     if (localId) connectParticipantMeter(localId, micAudioTrack);
+    wireMicTrackEvents(micAudioTrack);
+    clearMicRecoveryState();
+    success = true;
   } catch (e) {
     console.warn("restartMicTrack error", e);
   }
+  return success;
+}
+
+async function ensureMicTrackPublished(reason = '') {
+  try {
+    if (!room || room.state === 'disconnected') return false;
+    const pub = getLocalMicrophonePublication();
+    const track = pub?.track || micAudioTrack;
+    if (track?.mediaStreamTrack?.readyState === 'live') {
+      try { track.mediaStreamTrack.enabled = !micMuted; } catch (e) {}
+      return true;
+    }
+  } catch (e) {}
+  const ok = await restartMicTrack();
+  if (!ok) {
+    console.warn('[mic] ensure publish failed', { reason });
+    return false;
+  }
+  setMicMuteState(micMuted);
+  return true;
 }
 
 const muteMicBtn = document.getElementById("muteMicBtn");
@@ -3483,4 +3849,30 @@ muteMicBtn.classList.remove('is-muted');
 muteSystemBtn.classList.remove('is-muted');
 if (muteIncomingBtn) muteIncomingBtn.classList.remove('is-muted');
 if (leaveBtnIcon) leaveBtnIcon.style.display = 'none';
+
+if (window.__TEST_HOOKS__) {
+  window.__TEST_HOOKS__.core = {
+    setRoom: (nextRoom) => { room = nextRoom; },
+    getRoom: () => room,
+    restartMicTrack,
+    ensureMicTrackPublished,
+    stopMicGate,
+    buildMicConstraints,
+    micProcessing,
+    setMicMuted: (value) => { micMuted = !!value; },
+    getMicTrack: () => micAudioTrack,
+    getMicStream: () => micStream,
+    getLocalTrackRegistry: () => localTrackRegistry,
+    getRemoteAudioTrackCount: () => {
+      let count = 0;
+      participantAudioTracks.forEach(list => {
+        if (list && typeof list.size === 'number') count += list.size;
+      });
+      return count;
+    },
+    startBtn,
+    muteSystemBtn,
+    inputDeviceSelect
+  };
+}
 
